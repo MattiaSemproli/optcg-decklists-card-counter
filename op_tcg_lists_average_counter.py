@@ -1,6 +1,9 @@
 import re
 from collections import defaultdict
 
+# parse_input: 
+# it takes a string as input
+# returns a list of dictionaries, where each dictionary represents a card list.
 def parse_input(input_text):
     lists = input_text.strip().split('\n\n')
     card_lists = []
@@ -12,6 +15,9 @@ def parse_input(input_text):
 
     return card_lists
 
+# normalize_card_lists: 
+# it takes a list of dictionaries as input
+# returns a list of dictionaries, where each dictionary represents a card list with the same keys.
 def normalize_card_lists(card_lists):
     all_cards = set()
     for card_list in card_lists:
@@ -24,6 +30,9 @@ def normalize_card_lists(card_lists):
     
     return normalized_lists
 
+# calculate_averages: 
+# it takes a list of dictionaries as input
+# returns a dictionary where each key is a card and each value is a tuple containing a list of counts and the average count.
 def calculate_averages(card_lists):
     card_counts = defaultdict(list)
     for card_list in card_lists:
@@ -37,6 +46,7 @@ def calculate_averages(card_lists):
     
     return averages
 
+# main:
 def main():
     print("Enter the card lists (separate lists with a blank line, end input with two blank lines):")
     input_text = ""
@@ -61,5 +71,6 @@ def main():
         counts_str = ', '.join(f"{count}x" for count in counts)
         print(f"{card}: counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists")
 
+# Entry point of the script
 if __name__ == "__main__":
     main()
