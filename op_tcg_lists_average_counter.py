@@ -3,6 +3,8 @@ from collections import defaultdict
 from opcardlist import get_card
 import tkinter as tk
 from datetime import datetime
+import numpy as np
+from collections import Counter
 
 # display_output:
 # it takes output text, leader name and colors as input
@@ -98,9 +100,7 @@ def calculate_averages(card_lists):
     
     averages = {}
     for card, counts in card_counts.items():
-        avg = sum(counts) / len(counts)
-        averages[card] = (counts, avg)
-    
+        averages[card] = (counts, (np.count_nonzero(counts), Counter(counts)))
     return averages
 
 # main:
@@ -127,7 +127,7 @@ def main():
     output_text = ""
     leader = ""
     colors = ""
-    for card, (counts, avg) in averages.items():
+    for card, (counts, (played, avg)) in averages.items():
         counts_str = ', '.join(f"{count}x" for count in counts)
         card_info = get_card(card)
         c_name = card_info['Card Name']
@@ -137,9 +137,12 @@ def main():
 
         c_info = f"{c_name}, {c_cost}, {c_power if c_category != "Event" else c_category}"
 
+        played_list = f"played in {played}/{len(counts)} lists"
+        occurrences = f"1x {avg[1]}/{played}, 2x {avg[2]}/{played}, 3x {avg[3]}/{played}, 4x {avg[4]}/{played}"
+
         # print(f"{card} ({c_name}, {c_cost}, {c_power}) : counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists")
         if (c_category != "Leader"):
-            output_text += f"{card} ({c_info}) : counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists\n"
+            output_text += f"{card} ({c_info}) : counts = [{counts_str}], {played_list} ({occurrences})\n"
 
         if (c_category == "Leader"):
             leader = c_name
