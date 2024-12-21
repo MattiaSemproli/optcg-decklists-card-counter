@@ -13,11 +13,11 @@ def read_file(file_path):
                 matches.append((code, match))
 
             for i in range(0, ncols):
-                list = ""
+                list = "1xOP07-079\n"
                 for c, m in matches:
                     if m[i][0] != "0":
                         list += f"{m[i]}{c}\n"
-                print(f"{list}\n")
+                print(f"{list}")
 
     except FileNotFoundError:
         print(f"File not found: {file_path}")
