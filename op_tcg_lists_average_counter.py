@@ -135,7 +135,7 @@ def main():
         c_power = f"P{card_info["Power"]}"
         c_category = card_info["Category"]
 
-        c_info = f"{c_name}, {c_cost}, {c_power if c_category != leader else c_category}"
+        c_info = f"{c_name}, {c_cost}, {c_power if c_category != "Event" else c_category}"
 
         # print(f"{card} ({c_name}, {c_cost}, {c_power}) : counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists")
         if (c_category != "Leader"):
