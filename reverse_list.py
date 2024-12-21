@@ -13,7 +13,7 @@ def read_file(file_path):
                 matches.append((code, match))
 
             for i in range(0, ncols):
-                list = "1xOP07-079\n"
+                list = "1xOP07-079\n" # leader lucci, change it if not lucci
                 for c, m in matches:
                     if m[i][0] != "0":
                         list += f"{m[i]}{c}\n"
