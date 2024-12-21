@@ -57,7 +57,6 @@ def display_output(output_text, leader, colors):
 
     root.mainloop()
 
-
 # parse_input: 
 # it takes a string as input
 # returns a list of dictionaries, where each dictionary represents a card list.
@@ -155,8 +154,13 @@ def main():
         filename = f"{colors[0]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
     else:
         filename = f"{colors[0]}_{colors[1]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
-    with open(f"output\\{filename}", "x") as file:
-        file.write(output_text)
+
+    if (input("Do you want to save the output to a file? (y/n): ").lower() == "y"):
+        print(f"Saving output to {filename}")
+        with open(f"output\\{filename}", "x") as file:
+            file.write(output_text)
+    else:
+        print("Output not saved.")
 
 # Entry point of the script
 if __name__ == "__main__":
