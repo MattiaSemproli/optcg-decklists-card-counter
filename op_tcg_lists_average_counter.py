@@ -68,6 +68,8 @@ def parse_input(input_text):
     for lst in lists:
         cards = re.findall(r'(\d+)x(OP\d{2}-\d{3})', lst)
         cards.extend(patt for patt in re.findall(r'(\d+)x(P-\d{3})', lst))
+        cards.extend(patt for patt in re.findall(r'(\d+)x(ST\d{2}-\d{3})', lst))
+        cards.extend(patt for patt in re.findall(r'(\d+)x(EB\d{2}-\d{3})', lst))
         card_lists.append({card: int(count) for count, card in cards})
 
     card_lists = normalize_card_lists(card_lists)
