@@ -1,5 +1,7 @@
-### TO DO
-- Fix EB01 cards DONE
-- Fix ST cards DONE
-- Order cards by number of deck which they are in
-- Save the original decklists to a file
+### V1.0.0
+- Initial release
+- Folder v1.0.0 with all the old decklists, cardlist and average decklist counter script.
+- Working until OP09 included.
+
+### V2.0.0
+- Added all products after OP09 to OP12, ST, PROMOS and EB/PRB included.
