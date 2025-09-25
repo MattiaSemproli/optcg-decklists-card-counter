@@ -10,12 +10,13 @@ except Exception:
 
 from .core import decks_from_urls, group_decks_by_leader, summarize_decks, print_error
 from .ui_summary import SummaryWindow
+from .utils import tile_summary_windows  # NEW
 
 def launch_summary_windows(valid_links, root=None):
     """
     Build decks, group by leader, and open one summary window per leader group.
-    If 'root' is provided, reuse it (expected already created by caller, typically the Input root).
-    Otherwise, create a hidden root. App exits when the last summary window closes.
+    If 'root' is provided, reuse it; otherwise create a hidden root.
+    App exits when the last summary window closes.
     """
     decks = decks_from_urls(valid_links)
     if not decks:
@@ -32,7 +33,7 @@ def launch_summary_windows(valid_links, root=None):
             root = TBOOT.Window(themename="cosmo")
         else:
             root = tk.Tk()
-        root.withdraw()  # keep hidden
+        root.withdraw()
 
     # Track open Toplevel windows
     root._open_windows = 0  # type: ignore[attr-defined]
@@ -56,7 +57,7 @@ def launch_summary_windows(valid_links, root=None):
                     pass
         return _on_close
 
-    any_window = False
+    wins = []  # NEW: collect created Toplevels
     for lid, decks_in_group in groups.items():
         rows, header_text, leader_name, colors = summarize_decks(decks_in_group)
         if not rows:
@@ -73,11 +74,11 @@ def launch_summary_windows(valid_links, root=None):
 
         title_suffix = leader_name or "Unknown Leader"
         SummaryWindow(win, rows, header_text, title_suffix=title_suffix)
-        any_window = True
+        wins.append(win)
 
-    if any_window:
-        # If we created our own root, we need to run mainloop.
-        # If we reuse caller root, it's already in mainloop.
+    if wins:
+        # Arrange all summary windows nicely on the screen
+        tile_summary_windows(root, wins)  # NEW
         if own_root:
             root.mainloop()
     else:
