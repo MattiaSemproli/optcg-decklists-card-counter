@@ -2,6 +2,7 @@
 # Entry point: GUI-first; CLI fallback if Tk is not available.
 
 from .core import parse_deckgen_url, print_error
+from .app import launch_summary_windows  # <-- import at module level (important!)
 import sys
 
 # Tk availability check + UI imports here to avoid import errors in headless envs
@@ -9,7 +10,6 @@ try:
     import tkinter as tk
     from tkinter import ttk
     from .ui_input import InputWindow
-    from .app import launch_summary_windows
     TK_AVAILABLE = True
 except Exception:
     TK_AVAILABLE = False
@@ -24,14 +24,17 @@ def main():
             app = tk.Tk()
 
         def _on_submit(valid_links):
-            app.destroy()
-            launch_summary_windows(valid_links)
+            # Hide the Input root, then launch summaries on the SAME root
+            app.withdraw()
+            # Schedule after the current event returns, to avoid keybinding reentry issues
+            app.after(0, lambda: launch_summary_windows(valid_links, root=app))
+
 
         InputWindow(app, on_submit=_on_submit)
         app.mainloop()
         return
 
-    # CLI fallback
+    # ---------------- CLI fallback ----------------
     print("Paste one deckgen link per line.")
     print("Press ENTER on an empty line to finish.\n")
     urls = []
@@ -54,7 +57,7 @@ def main():
         print_error("No valid deckgen links provided. Exiting.")
         sys.exit(1)
 
-    from .app import launch_summary_windows
+    # call directly; do NOT re-import here
     launch_summary_windows(urls)
 
 if __name__ == "__main__":

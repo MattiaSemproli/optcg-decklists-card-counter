@@ -5,6 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from .core import parse_deckgen_url
+from .utils import center_window
 
 try:
     import ttkbootstrap as tb
@@ -23,6 +24,8 @@ class InputWindow:
         self.on_submit = on_submit
         self.valid_links = []
         self.invalid_links = []
+
+        center_window(self.master, 0.8, 0.8)
 
         self._build_ui()
 

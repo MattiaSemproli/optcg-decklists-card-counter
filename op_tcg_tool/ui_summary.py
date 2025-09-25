@@ -6,6 +6,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from .utils import center_window
+
 try:
     import ttkbootstrap as tb
     TBOOT = tb
@@ -17,6 +19,8 @@ class SummaryWindow:
         self.master = master
         self.rows_all = rows[:]   # (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
         self.rows_view = rows[:]
+
+        center_window(self.master, 0.8, 0.8)
 
         self._build_ui(header_text, title_suffix)
         self._populate_table(self.rows_view)

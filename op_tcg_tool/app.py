@@ -11,10 +11,11 @@ except Exception:
 from .core import decks_from_urls, group_decks_by_leader, summarize_decks, print_error
 from .ui_summary import SummaryWindow
 
-def launch_summary_windows(valid_links):
+def launch_summary_windows(valid_links, root=None):
     """
     Build decks, group by leader, and open one summary window per leader group.
-    Root window stays hidden; app exits when the last summary window closes.
+    If 'root' is provided, reuse it (expected already created by caller, typically the Input root).
+    Otherwise, create a hidden root. App exits when the last summary window closes.
     """
     decks = decks_from_urls(valid_links)
     if not decks:
@@ -23,12 +24,15 @@ def launch_summary_windows(valid_links):
 
     groups, meta = group_decks_by_leader(decks)
 
-    # Create hidden root
-    if TBOOT:
-        root = TBOOT.Window(themename="cosmo")
-    else:
-        root = tk.Tk()
-    root.withdraw()
+    # Reuse caller root if provided, else create our own
+    own_root = False
+    if root is None:
+        own_root = True
+        if TBOOT:
+            root = TBOOT.Window(themename="cosmo")
+        else:
+            root = tk.Tk()
+        root.withdraw()  # keep hidden
 
     # Track open Toplevel windows
     root._open_windows = 0  # type: ignore[attr-defined]
@@ -44,6 +48,7 @@ def launch_summary_windows(valid_links):
             except Exception:
                 pass
             if getattr(root, "_open_windows", 0) <= 0:
+                # last window closed -> exit
                 try:
                     root.quit()
                     root.destroy()
@@ -57,7 +62,7 @@ def launch_summary_windows(valid_links):
         if not rows:
             continue
 
-        # Toplevel per leader group
+        # Create one Toplevel per leader group, parented to 'root'
         if TBOOT:
             win = TBOOT.Toplevel(root)
         else:
@@ -71,10 +76,14 @@ def launch_summary_windows(valid_links):
         any_window = True
 
     if any_window:
-        root.mainloop()
+        # If we created our own root, we need to run mainloop.
+        # If we reuse caller root, it's already in mainloop.
+        if own_root:
+            root.mainloop()
     else:
         print_error("No rows to display after filtering (leaders are excluded).")
         try:
-            root.destroy()
+            if own_root:
+                root.destroy()
         except Exception:
             pass
