@@ -1,172 +1,732 @@
-import re
-from collections import defaultdict
-from opcardlist import get_card
-import tkinter as tk
+# op_tcg_lists_average_counter.py
+# NOTE: code and comments in ENGLISH (per your rule).
+# GUI-first flow: input window -> one summary window PER LEADER.
+# CLI fallback remains if Tkinter isn't available.
+
+import csv
+from collections import defaultdict, Counter
 from datetime import datetime
-import numpy as np
-from collections import Counter
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
-# display_output:
-# it takes output text, leader name and colors as input
-def display_output(output_text, leader, colors):
-    root = tk.Tk()
-    if len(colors) == 1:
-        root.title(f"Decklist Information: {colors[0]} {leader}")
+# --------------------------- optional terminal pretties ---------------------------
+try:
+    from colorama import init as colorama_init, Fore, Style
+    colorama_init()
+    COLOR_RED = Fore.RED
+    COLOR_RESET = Style.RESET_ALL
+except Exception:
+    COLOR_RED = "\033[31m"
+    COLOR_RESET = "\033[0m"
+
+# --------------------------- GUI (Tkinter / ttk / ttkbootstrap) -------------------
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+    TK_AVAILABLE = True
+except Exception:
+    TK_AVAILABLE = False
+
+# Prefer ttkbootstrap for a nicer theme if present
+TBOOT = None
+if TK_AVAILABLE:
+    try:
+        import ttkbootstrap as tb
+        TBOOT = tb
+    except Exception:
+        TBOOT = None
+
+# --------------------------- optional cards DB accessor ---------------------------
+try:
+    from opc_sets import get_card
+except Exception:
+    def get_card(code: str):
+        return None
+
+# --------------------------- helpers ---------------------------
+def print_error(msg: str) -> None:
+    """Print a red error line without stopping the program."""
+    print(f"{COLOR_RED}{msg}{COLOR_RESET}")
+
+def get_category(info: dict) -> str:
+    """Return normalized category string ('character', 'event', 'stage', 'leader', ...)."""
+    if not info:
+        return ""
+    return (info.get('Category') or '').strip().lower()
+
+def category_rank(cat: str) -> int:
+    """
+    Default grouping order:
+      Character (0) < Event (1) < Stage (2) < others (3).
+    """
+    c = (cat or "").lower()
+    if c == "character":
+        return 0
+    if c == "event":
+        return 1
+    if c == "stage":
+        return 2
+    return 3
+
+def card_cost(info: dict):
+    """
+    Extract numeric Generic cost if available; otherwise return None.
+    """
+    if not info:
+        return None
+    cost = info.get('Cost')
+    if isinstance(cost, dict):
+        g = cost.get('Generic')
+        if g is not None:
+            try:
+                return int(g)
+            except Exception:
+                try:
+                    return int(float(g))
+                except Exception:
+                    return None
+    elif isinstance(cost, (int, float, str)):
+        try:
+            return int(cost)
+        except Exception:
+            try:
+                return int(float(cost))
+            except Exception:
+                return None
+    return None
+
+def card_power(info: dict):
+    """Return numeric Power if present, else None."""
+    if not info:
+        return None
+    p = info.get('Power')
+    if p is None or str(p).strip() == "":
+        return None
+    try:
+        return int(p)
+    except Exception:
+        try:
+            return int(float(p))
+        except Exception:
+            return None
+
+def card_colors(info: dict):
+    """Return list of color strings."""
+    colors = (info or {}).get('Color')
+    if isinstance(colors, list):
+        return [str(c) for c in colors]
+    if isinstance(colors, str) and colors.strip():
+        return [colors.strip()]
+    return []
+
+def card_color_str(info: dict) -> str:
+    """Return display string for colors (joined with '/')."""
+    cols = card_colors(info)
+    return " / ".join(cols) if cols else ""
+
+def is_leader(info: dict) -> bool:
+    return get_category(info) == 'leader'
+
+def card_name(info: dict, fallback_id: str) -> str:
+    """Return Name -> Card Name -> card ID as fallback."""
+    if not info:
+        return fallback_id
+    return (info.get("Name") or info.get("Card Name") or fallback_id)
+
+# --------------------------- deckgen parsing ---------------------------
+def parse_deckgen_url(url: str):
+    """
+    Parse a onepiecetopdecks deckgen URL and return a list of (card_id, count).
+    Uses the 'dg' query param which encodes like: 1nOP03-040a4nOP03-044...
+    Return [] if invalid or no 'dg'.
+    """
+    try:
+        qs = parse_qs(urlparse(url).query)
+        dg = qs.get("dg", [""])[0]
+        if not dg:
+            return []
+        parts = dg.split("a")
+        out = []
+        for part in parts:
+            if not part or "n" not in part:
+                continue
+            cnt_str, code = part.split("n", 1)
+            cnt_str = cnt_str.strip()
+            code = code.strip()
+            if not cnt_str.isdigit() or not code:
+                return []  # treat the whole line as invalid
+            out.append((code, int(cnt_str)))
+        return out
+    except Exception:
+        return []
+
+def decks_from_urls(urls):
+    """Return a list of deck dicts: [{card_id: count, ...}, ...]."""
+    decks = []
+    for u in urls:
+        pairs = parse_deckgen_url(u)
+        if not pairs:
+            continue
+        deck = defaultdict(int)
+        for cid, n in pairs:
+            deck[cid] += n
+        decks.append(dict(deck))
+    return decks
+
+# --------------------------- leader inference & grouping ---------------------------
+def infer_deck_leader(deck: dict):
+    """
+    Given a single deck {card_id: count}, return (leader_id, leader_name, leader_colors_list) if any;
+    otherwise (None, None, []).
+    """
+    for cid in deck:
+        info = get_card(cid) or {}
+        if is_leader(info):
+            return cid, card_name(info, cid), card_colors(info)
+    return None, None, []
+
+def group_decks_by_leader(decks):
+    """
+    Partition decks by inferred leader ID.
+    Returns:
+      groups: dict[leader_id_or_None] -> list[deck]
+      meta: dict[leader_id_or_None] -> {"name": str|None, "colors": list[str]}
+    Decks with no detectable leader are grouped under key None.
+    """
+    groups = defaultdict(list)
+    meta = {}
+    for d in decks:
+        lid, lname, lcols = infer_deck_leader(d)
+        groups[lid].append(d)
+        if lid not in meta:
+            meta[lid] = {"name": lname, "colors": lcols}
+    return groups, meta
+
+# --------------------------- aggregation ---------------------------
+def summarize_decks(decks):
+    """
+    Aggregate stats across decks (leaders are EXCLUDED from the rows).
+    Returns:
+      rows: list of tuples (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
+      header_text: str
+      leader_name_val: str|None
+      colors: list[str]
+    """
+    if not decks:
+        return [], "No valid lists found.", None, []
+
+    num_decks = len(decks)
+    total_counts = Counter()
+    occurrence = Counter()
+    for d in decks:
+        total_counts.update(d)
+        for cid in d:
+            occurrence[cid] += 1
+
+    # detect a leader just for header (may be None)
+    leader_name_val = None
+    colors = []
+    lid, lname, lcols = infer_deck_leader(decks[0]) if decks else (None, None, [])
+    leader_name_val = lname
+    colors = lcols
+
+    rows = []
+    for cid in total_counts:
+        info = get_card(cid) or {}
+        cat = get_category(info)
+        if cat == "leader":
+            continue  # EXCLUDE leaders from rows
+
+        nm = card_name(info, cid)
+        cval = card_cost(info)          # numeric or None
+        pval = card_power(info)         # numeric or None
+        colstr = card_color_str(info)   # "Red", "Blue / Green", ...
+        crank = category_rank(cat)
+        total = total_counts[cid]
+        occ = occurrence[cid]
+        avg_all = total / num_decks
+        rows.append((avg_all, occ, total, cid, nm, cval, colstr, pval, cat, crank))
+
+    # Default order: by category group, then by avg desc, then occ desc, then ID
+    rows.sort(key=lambda r: (r[9], -r[0], -r[1], r[3]))
+
+    header = f"Decks analyzed: {num_decks}"
+    if colors:
+        header += f" | Colors: {' / '.join(colors[:2])}"
+    if leader_name_val:
+        header += f" | Leader: {leader_name_val}"
+
+    return rows, header, leader_name_val, colors
+
+# --------------------------- GUI: summary window ---------------------------
+class SummaryWindow:
+    def __init__(self, master, rows, header_text, title_suffix: str = ""):
+        self.master = master
+        self.rows_all = rows[:]   # (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
+        self.rows_view = rows[:]
+
+        self._build_ui(header_text, title_suffix)
+        self._populate_table(self.rows_view)
+
+    def _build_ui(self, header_text: str, title_suffix: str):
+        master = self.master
+        base_title = "OPTCG Decklists Summary"
+        if title_suffix:
+            base_title += f" — {title_suffix}"
+        master.title(base_title)
+
+        if TBOOT:
+            TBOOT.Style("cosmo")
+        else:
+            ttk.Style(master)
+
+        # Top frame: header + search
+        top = ttk.Frame(master, padding=10)
+        top.pack(side="top", fill="x")
+
+        self.header_var = tk.StringVar(value=header_text)
+        ttk.Label(top, textvariable=self.header_var, font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        search_frame = ttk.Frame(top)
+        search_frame.pack(side="right")
+        ttk.Label(search_frame, text="Search: ").pack(side="left")
+        self.search_var = tk.StringVar()
+        ent = ttk.Entry(search_frame, textvariable=self.search_var, width=28)
+        ent.pack(side="left")
+        ent.bind("<KeyRelease>", self._on_search)
+
+        # Middle frame: table
+        mid = ttk.Frame(master, padding=(10, 0, 10, 10))
+        mid.pack(side="top", fill="both", expand=True)
+
+        cols = ("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power")
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        # Zebra striping
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=24)
+        self.tree.tag_configure("odd", background="#f7f7f7")
+        self.tree.tag_configure("even", background="#ffffff")
+
+        # Headings with sort commands
+        for col in cols:
+            self.tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c, False))
+
+        # Column widths
+        self.tree.column("Avg", width=70, anchor="e")
+        self.tree.column("Occ", width=60, anchor="e")
+        self.tree.column("Total", width=70, anchor="e")
+        self.tree.column("ID", width=100, anchor="w")
+        self.tree.column("Name", width=240, anchor="w")
+        self.tree.column("Cost", width=60, anchor="e")
+        self.tree.column("Color", width=120, anchor="w")
+        self.tree.column("Power", width=70, anchor="e")
+
+        vsb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=vsb.set)
+        vsb.pack(side="right", fill="y")
+
+        # Bottom frame: actions
+        bottom = ttk.Frame(master, padding=(10, 0, 10, 10))
+        bottom.pack(side="bottom", fill="x")
+
+        btn_copy = ttk.Button(bottom, text="Copy selection (Ctrl+C)", command=self._copy_selection)
+        btn_copy.pack(side="left", padx=(0, 5))
+
+        btn_csv = ttk.Button(bottom, text="Export CSV", command=self._export_csv)
+        btn_csv.pack(side="left", padx=5)
+
+        btn_txt = ttk.Button(bottom, text="Export TXT", command=self._export_txt)
+        btn_txt.pack(side="left", padx=5)
+
+        # Shortcuts
+        master.bind_all("<Control-f>", lambda e: self._focus_search())
+        master.bind_all("<Control-F>", lambda e: self._focus_search())
+        master.bind_all("<Control-c>", lambda e: self._copy_selection())
+        master.bind_all("<Control-C>", lambda e: self._copy_selection())
+
+    def _populate_table(self, rows):
+        self.tree.delete(*self.tree.get_children())
+        for idx, (avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank) in enumerate(rows):
+            tag = "odd" if idx % 2 else "even"
+            cost_disp = "" if cval is None else str(cval)
+            pow_disp = "" if pval is None else str(pval)
+            self.tree.insert("", "end",
+                             values=(f"{avg:.2f}", occ, total, cid, nm, cost_disp, colstr, pow_disp),
+                             tags=(tag,))
+
+    def _sort_by_column(self, col, reverse):
+        # Map visible columns to row tuple indices
+        key_idx = {
+            "Avg": 0, "Occ": 1, "Total": 2, "ID": 3,
+            "Name": 4, "Cost": 5, "Color": 6, "Power": 7
+        }[col]
+
+        def key_func(row):
+            val = row[key_idx]
+            # numeric columns: Avg, Occ, Total, Cost, Power
+            if key_idx in (0, 1, 2, 5, 7):
+                return -1 if val is None else val
+            return str(val).lower()
+
+        self.rows_view.sort(key=key_func, reverse=reverse)
+        self._populate_table(self.rows_view)
+        # toggle for next click
+        self.tree.heading(col, command=lambda c=col: self._sort_by_column(c, not reverse))
+
+    def _on_search(self, event=None):
+        q = (self.search_var.get() or "").strip().lower()
+        if not q:
+            self.rows_view = self.rows_all[:]
+        else:
+            def keep(r):
+                # r = (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
+                return q in str(r[3]).lower() or q in str(r[4]).lower()
+            self.rows_view = [r for r in self.rows_all if keep(r)]
+        self._populate_table(self.rows_view)
+
+    def _focus_search(self):
+        # Focus the search entry
+        for w in self.master.winfo_children():
+            for ww in w.winfo_children():
+                if isinstance(ww, (ttk.Entry,)):
+                    ww.focus_set()
+                    ww.select_range(0, 'end')
+                    return
+
+    def _copy_selection(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Copy", "No rows selected.")
+            return
+        rows_txt = []
+        for iid in sel:
+            vals = self.tree.item(iid, "values")
+            rows_txt.append("\t".join(str(v) for v in vals))
+        txt = "\n".join(rows_txt)
+        self.master.clipboard_clear()
+        self.master.clipboard_append(txt)
+        messagebox.showinfo("Copy", f"Copied {len(sel)} row(s) to clipboard.")
+
+    def _ask_save_path(self, default_ext, filetypes, default_name_prefix="summary"):
+        dt_string = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"{default_name_prefix}_{dt_string}{default_ext}"
+        return filedialog.asksaveasfilename(defaultextension=default_ext,
+                                            filetypes=filetypes,
+                                            initialfile=default_name)
+
+    def _export_csv(self):
+        path = self._ask_save_path(".csv", [("CSV files", "*.csv"), ("All files", "*.*")])
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"])
+            for r in self.rows_view:
+                avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank = r
+                w.writerow([f"{avg:.2f}", occ, total, cid, nm,
+                            "" if cval is None else cval,
+                            colstr,
+                            "" if pval is None else pval])
+        messagebox.showinfo("Export CSV", f"Saved to:\n{path}")
+
+    def _export_txt(self):
+        path = self._ask_save_path(".txt", [("Text files", "*.txt"), ("All files", "*.*")])
+        if not path:
+            return
+        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<28}  {:>4}  {:<12}  {:>5}"
+        lines = [fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"), "-" * 100]
+        for avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank in self.rows_view:
+            cost_disp = "" if cval is None else str(cval)
+            pow_disp = "" if pval is None else str(pval)
+            lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:28], cost_disp, colstr[:12], pow_disp))
+        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        messagebox.showinfo("Export TXT", f"Saved to:\n{path}")
+
+# --------------------------- GUI: input window ---------------------------
+class InputWindow:
+    """
+    First-step GUI: paste deckgen links (one per line), live-validate,
+    and proceed to one or more summary windows (one per leader).
+    """
+    def __init__(self, master, on_submit):
+        # on_submit: callable(list[str]) -> None
+        self.master = master
+        self.on_submit = on_submit
+        self.valid_links = []
+        self.invalid_links = []
+
+        self._build_ui()
+
+    def _build_ui(self):
+        self.master.title("OPTCG Decklists - Input")
+
+        container = ttk.Frame(self.master, padding=10)
+        container.pack(fill="both", expand=True)
+
+        header = ttk.Label(container, text="Paste deckgen links (one per line)", font=("Segoe UI", 11, "bold"))
+        header.pack(anchor="w", pady=(0, 6))
+
+        # Buttons row
+        btn_row = ttk.Frame(container)
+        btn_row.pack(fill="x", pady=(0, 6))
+        ttk.Button(btn_row, text="Paste from clipboard", command=self._paste_clipboard).pack(side="left")
+        ttk.Button(btn_row, text="Load .txt…", command=self._load_txt).pack(side="left", padx=6)
+        ttk.Button(btn_row, text="Clear", command=self._clear).pack(side="left")
+
+        # Text area
+        self.text = tk.Text(container, height=12, wrap="none", font=("Consolas", 10))
+        self.text.pack(fill="both", expand=True)
+        self.text.bind("<KeyRelease>", self._on_text_change)
+        self.text.bind("<Control-Return>", self._on_ctrl_enter)
+
+        # Status + Next
+        bottom = ttk.Frame(container)
+        bottom.pack(fill="x", pady=(6, 0))
+
+        self.status_var = tk.StringVar(value="Valid: 0 · Invalid: 0")
+        ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
+
+        self.next_btn = ttk.Button(bottom, text="Next →", command=self._submit, state="disabled")
+        self.next_btn.pack(side="right")
+
+        # Initial validation
+        self._validate()
+
+    def _paste_clipboard(self):
+        try:
+            clip = self.master.clipboard_get() or ""
+        except Exception:
+            clip = ""
+        if not clip:
+            return
+        lines = clip.strip().splitlines()
+        self._insert_lines(lines)
+
+    def _load_txt(self):
+        path = filedialog.askopenfilename(
+            title="Open links list",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+        except Exception:
+            messagebox.showerror("Open error", "Failed to read the file.")
+            return
+        lines = content.splitlines()
+        self._insert_lines(lines)
+
+    def _clear(self):
+        self.text.delete("1.0", "end")
+        self._validate()
+
+    def _insert_lines(self, lines):
+        # Deduplicate while keeping order
+        seen = set()
+        deduped = []
+        for ln in lines:
+            ln = ln.strip()
+            if ln and ln not in seen:
+                seen.add(ln)
+                deduped.append(ln)
+        if deduped:
+            current = self.text.get("1.0", "end-1c")
+            if current:
+                self.text.insert("end", "\n" + "\n".join(deduped))
+            else:
+                self.text.insert("1.0", "\n".join(deduped))
+        self._validate()
+
+    def _on_text_change(self, event=None):
+        self._validate()
+
+    def _on_ctrl_enter(self, event=None):
+        self._submit()
+        return "break"
+
+    def _validate(self):
+        content = self.text.get("1.0", "end-1c")
+        lines_all = content.splitlines()
+
+        # Build lists based on stripped non-empty lines
+        self.valid_links = []
+        self.invalid_links = []
+
+        for ln in lines_all:
+            s = ln.strip()
+            if not s:
+                continue
+            pairs = parse_deckgen_url(s)
+            if pairs:
+                self.valid_links.append(s)
+            else:
+                self.invalid_links.append(s)
+
+        # Update status
+        self.status_var.set(f"Valid: {len(self.valid_links)} · Invalid: {len(self.invalid_links)}")
+
+        # Highlight invalid lines in the text widget
+        self._highlight_invalid(lines_all)
+
+        # Enable Next only if we have at least one valid link
+        self.next_btn.configure(state=("normal" if self.valid_links else "disabled"))
+
+    def _highlight_invalid(self, lines_all):
+        self.text.tag_remove("invalid", "1.0", "end")
+        try:
+            self.text.tag_configure("invalid", background="#ffe6e6")  # light red
+        except Exception:
+            pass
+        invalid_set = set(self.invalid_links)
+        for i, raw in enumerate(lines_all):
+            s = raw.strip()
+            if s and s in invalid_set:
+                line_start = f"{i+1}.0"
+                line_end = f"{i+1}.end"
+                self.text.tag_add("invalid", line_start, line_end)
+
+    def _submit(self):
+        if not self.valid_links:
+            messagebox.showwarning("No lists", "Please add at least one valid deckgen link.")
+            return
+        self.on_submit(self.valid_links)
+
+# --------------------------- flow helpers ---------------------------
+def _launch_summary_windows(valid_links):
+    """
+    Build decks, group them by leader, and open one summary window per leader group.
+    Root window stays hidden; app exits automatically when the last summary window closes.
+    """
+    decks = decks_from_urls(valid_links)
+    if not decks:
+        print_error("No valid deck data could be parsed.")
+        return
+
+    groups, meta = group_decks_by_leader(decks)
+
+    if not TK_AVAILABLE:
+        print_error("Tkinter is not available in this environment. GUI not shown.")
+        return
+
+    # Create a single hidden root
+    if TBOOT:
+        root = TBOOT.Window(themename="cosmo")
     else:
-        root.title(f"Decklist Information: {colors[0]} & {colors[1]} {leader}")
+        root = tk.Tk()
+    root.withdraw()  # keep root hidden, no "mini window"
 
-    # Insert a blank line at the start for padding
-    output_text = "\n" + output_text
+    # Track how many top-level windows are open; when the last one closes, exit the app
+    root._open_windows = 0  # type: ignore[attr-defined]
 
-    # Set default font
-    default_font = ("Consolas", 10)
+    def make_on_close(win):
+        def _on_close():
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            # decrement counter and quit app if no windows remain
+            try:
+                root._open_windows -= 1  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if getattr(root, "_open_windows", 0) <= 0:
+                try:
+                    root.quit()
+                    root.destroy()
+                except Exception:
+                    pass
+        return _on_close
 
-    # Create a Label widget for non-selectable text
-    label = tk.Label(
-        root,
-        text=output_text,
-        font=default_font,
-        bg="white",
-        justify="center",
-        anchor="center"
-    )
-    label.pack(fill=tk.BOTH, expand=True)
+    any_window = False
+    for lid, decks_in_group in groups.items():
+        rows, header_text, leader_name, colors = summarize_decks(decks_in_group)
 
-    # Calculate dimensions based on content
-    lines = output_text.split('\n')
-    max_line_length = max(len(line) for line in lines)
-    num_lines = len(lines)
-    char_width = 8  # Approximate width of a character in pixels
-    char_height = 18  # Approximate height of a line in pixels
-    window_width = char_width * max_line_length
-    window_height = char_height * num_lines
+        # Console snapshot (optional)
+        print(header_text)
+        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<28}  {:>4}  {:<12}  {:>5}"
+        print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"))
+        print("-" * 100)
+        for avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank in rows:
+            cost_disp = "" if cval is None else str(cval)
+            pow_disp = "" if pval is None else str(pval)
+            print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:28], cost_disp, colstr[:12], pow_disp))
 
-    # Center the window on the screen
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    position_top = int(screen_height / 2 - window_height / 2)
-    position_right = int(screen_width / 2 - window_width / 2)
-    root.geometry(f'{window_width}x{window_height}+{position_right}+{position_top}')
+        if not rows:
+            continue
 
-    # Make the window non-resizable
-    root.resizable(False, False)
+        # Create one Toplevel per leader group
+        if TBOOT:
+            win = TBOOT.Toplevel(root)
+        else:
+            win = tk.Toplevel(root)
 
-    # Bring the window to the front and activate it
-    root.attributes("-topmost", True)
-    root.update()
-    root.focus_force()
-    root.attributes("-topmost", False)
+        # Increment window counter and attach close handler
+        root._open_windows += 1  # type: ignore[attr-defined]
+        win.protocol("WM_DELETE_WINDOW", make_on_close(win))
 
-    root.mainloop()
+        title_suffix = leader_name or "Unknown Leader"
+        SummaryWindow(win, rows, header_text, title_suffix=title_suffix)
+        any_window = True
 
-# parse_input: 
-# it takes a string as input
-# returns a list of dictionaries, where each dictionary represents a card list.
-def parse_input(input_text):
-    lists = input_text.strip().split('\n\n')
-    card_lists = []
-    for lst in lists:
-        cards = re.findall(r'(\d+)x(OP\d{2}-\d{3})', lst)
-        cards.extend(patt for patt in re.findall(r'(\d+)x(P-\d{3})', lst))
-        cards.extend(patt for patt in re.findall(r'(\d+)x(ST\d{2}-\d{3})', lst))
-        cards.extend(patt for patt in re.findall(r'(\d+)x(EB\d{2}-\d{3})', lst))
-        card_lists.append({card: int(count) for count, card in cards})
+    if any_window:
+        # No deiconify(): root stays hidden; mainloop runs until last Toplevel is closed
+        root.mainloop()
+    else:
+        print_error("No rows to display after filtering (leaders are excluded).")
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
-    card_lists = normalize_card_lists(card_lists)
-
-    return card_lists
-
-# normalize_card_lists: 
-# it takes a list of dictionaries as input
-# returns a list of dictionaries, where each dictionary represents a card list with the same keys.
-def normalize_card_lists(card_lists):
-    all_cards = set()
-    for card_list in card_lists:
-        all_cards.update(card_list.keys())
-    
-    normalized_lists = []
-    for card_list in card_lists:
-        normalized_list = {card: card_list.get(card, 0) for card in all_cards}
-        normalized_lists.append(normalized_list)
-    
-    return normalized_lists
-
-# calculate_averages: 
-# it takes a list of dictionaries as input
-# returns a dictionary where each key is a card and each value is a tuple containing a list of counts and the average count.
-def calculate_averages(card_lists):
-    card_counts = defaultdict(list)
-    for card_list in card_lists:
-        for card, count in card_list.items():
-            card_counts[card].append(count)
-    
-    averages = {}
-    for card, counts in card_counts.items():
-        averages[card] = (counts, (np.count_nonzero(counts), Counter(counts)))
-    return averages
-
-# main:
+# --------------------------- main ---------------------------
 def main():
-    print("Enter the card lists (separate lists with a blank line, end input with two blank lines):")
-    input_text = ""
-    blank_line_count = 0
+    # If Tkinter is available, prefer GUI-first flow.
+    if TK_AVAILABLE:
+        # Choose themed window if ttkbootstrap is available
+        if TBOOT:
+            app = TBOOT.Window(themename="cosmo")
+        else:
+            app = tk.Tk()
+
+        def _on_submit(valid_links):
+            # Close input window and move to multiple summary windows (one per leader)
+            app.destroy()
+            _launch_summary_windows(valid_links)
+
+        InputWindow(app, on_submit=_on_submit)
+        app.mainloop()
+        return
+
+    # Fallback: CLI input (single-pass, still groups by leader when rendering)
+    print("Paste one deckgen link per line.")
+    print("Press ENTER on an empty line to finish.\n")
+
+    urls = []
     while True:
         try:
-            line = input()
-            if line.strip() == "":
-                blank_line_count += 1
-                if blank_line_count == 2:
-                    break
-            else:
-                blank_line_count = 0
-            input_text += line + "\n"
+            line = input("> ")
         except EOFError:
             break
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            break
 
-    card_lists = parse_input(input_text)
-    averages = calculate_averages(card_lists)
+        pairs = parse_deckgen_url(line)
+        if not pairs:
+            print_error("Invalid input: not a valid deckgen URL or missing 'dg' data.")
+            continue
+        urls.append(line)
 
-    output_text = ""
-    leader = ""
-    colors = ""
-    for card, (counts, (played, avg)) in averages.items():
-        counts_str = ', '.join(f"{count}x" for count in counts)
-        card_info = get_card(card)
-        c_name = card_info['Card Name']
-        c_cost = f"C{card_info["Cost"]["Generic"]}"
-        c_power = f"P{card_info["Power"]}"
-        c_category = card_info["Category"]
+    if not urls:
+        print_error("No valid deckgen links provided. Exiting.")
+        return
 
-        c_info = f"{c_name}, {c_cost}, {c_power if c_category != "Event" else c_category}"
+    _launch_summary_windows(urls)
 
-        played_list = f"played in {played}/{len(counts)} lists"
-        occurrences = f"1x {avg[1]}/{played}, 2x {avg[2]}/{played}, 3x {avg[3]}/{played}, 4x {avg[4]}/{played}"
-
-        # print(f"{card} ({c_name}, {c_cost}, {c_power}) : counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists")
-        if (c_category != "Leader"):
-            output_text += f"{card} ({c_info}) : counts = [{counts_str}], {played_list} ({occurrences})\n"
-
-        if (c_category == "Leader"):
-            leader = c_name
-            colors = card_info["Color"]
-
-    display_output(output_text, leader, colors)
-
-    # dd/mm/YY H:M:S
-    dt_string = datetime.now().strftime("%d%m%Y_%H%M%S")
-    filename = ""
-    if len(colors) == 1:
-        filename = f"{colors[0]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
-    else:
-        filename = f"{colors[0]}_{colors[1]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
-
-    if (input("Do you want to save the output to a file? (y/n): ").lower() == "y"):
-        print(f"Saving output to {filename}")
-        with open(f"output\\{filename}", "x") as file:
-            file.write(output_text)
-    else:
-        print("Output not saved.")
-
-# Entry point of the script
 if __name__ == "__main__":
     main()
