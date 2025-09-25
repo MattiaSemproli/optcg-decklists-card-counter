@@ -43,16 +43,36 @@ def print_error(msg: str) -> None:
     """Print a red error line without stopping the program."""
     print(f"{COLOR_RED}{msg}{COLOR_RESET}")
 
+def get_category(info: dict) -> str:
+    """Return normalized category string ('character', 'event', 'stage', ...)"""
+    if not info:
+        return ""
+    return (info.get('Category') or '').strip().lower()
+
+def category_rank(cat: str) -> int:
+    """
+    Return rank for default grouping order:
+    Character (0) < Event (1) < Stage (2) < others (3).
+    """
+    c = (cat or "").lower()
+    if c == "character":
+        return 0
+    if c == "event":
+        return 1
+    if c == "stage":
+        return 2
+    return 3
+
 def format_card_stats(card_info: dict) -> str:
     """
     Compact stat string for the table:
     - Events: [Event]
-    - Otherwise, prefer Power; then Generic cost; else '—'
+    - Otherwise prefer Power; then Generic cost; else '—'
     """
     if not card_info:
         return "—"
-    category = (card_info.get('Category') or '').strip().lower()
-    if category == 'event':
+    cat = get_category(card_info)
+    if cat == 'event':
         return "[Event]"
     power = card_info.get('Power')
     if power is not None and str(power).strip():
@@ -62,8 +82,35 @@ def format_card_stats(card_info: dict) -> str:
         return f"C{cost.get('Generic')}"
     return "—"
 
+def card_cost(info: dict):
+    """
+    Extract numeric Generic cost if available; otherwise return None.
+    """
+    if not info:
+        return None
+    cost = info.get('Cost')
+    if isinstance(cost, dict):
+        g = cost.get('Generic')
+        if g is not None:
+            try:
+                return int(g)
+            except Exception:
+                try:
+                    return int(float(g))
+                except Exception:
+                    return None
+    elif isinstance(cost, (int, float, str)):
+        try:
+            return int(cost)
+        except Exception:
+            try:
+                return int(float(cost))
+            except Exception:
+                return None
+    return None
+
 def is_leader(card_info: dict) -> bool:
-    return bool(card_info) and (card_info.get('Category') or '').strip().lower() == 'leader'
+    return get_category(card_info) == 'leader'
 
 def get_colors(card_info: dict):
     colors = (card_info or {}).get('Color')
@@ -74,7 +121,10 @@ def get_colors(card_info: dict):
     return []
 
 def card_name(info: dict, fallback_id: str) -> str:
-    """Always return a name: 'Name' -> 'Card Name' -> card ID."""
+    """
+    Always return something for the display name:
+    try 'Name' -> 'Card Name' -> fallback to card ID.
+    """
     if not info:
         return fallback_id
     return (info.get("Name") or info.get("Card Name") or fallback_id)
@@ -112,7 +162,6 @@ def decks_from_urls(urls):
     for u in urls:
         pairs = parse_deckgen_url(u)
         if not pairs:
-            # protected by validation in input loop; keep guard
             continue
         deck = defaultdict(int)
         for cid, n in pairs:
@@ -125,7 +174,7 @@ def summarize_decks(decks):
     """
     Aggregate stats across decks.
     Returns:
-      rows: list of tuples (avg, occ, total, id, name, stat)
+      rows: list of tuples (avg, occ, total, id, name, cost_val, stat, cat_str, cat_rank)
       header_text: str
       leader_name_val: str|None
       colors: list[str]
@@ -158,12 +207,16 @@ def summarize_decks(decks):
         info = get_card(cid) or {}
         nm = card_name(info, cid)
         stat = format_card_stats(info)
+        cval = card_cost(info)  # numeric or None
+        cat = get_category(info)
+        crank = category_rank(cat)
         total = total_counts[cid]
         occ = occurrence[cid]
         avg_all = total / num_decks
-        rows.append((avg_all, occ, total, cid, nm, stat))
+        rows.append((avg_all, occ, total, cid, nm, cval, stat, cat, crank))
 
-    rows.sort(key=lambda x: (-x[0], -x[1], x[3]))
+    # default order: by category group, then by avg desc, then occ desc, then ID
+    rows.sort(key=lambda r: (r[8], -r[0], -r[1], r[3]))
 
     header = f"Decks analyzed: {num_decks}"
     if colors:
@@ -177,8 +230,8 @@ def summarize_decks(decks):
 class SummaryWindow:
     def __init__(self, master, rows, header_text):
         self.master = master
-        self.rows_all = rows[:]   # full dataset
-        self.rows_view = rows[:]  # filtered/sorted view
+        self.rows_all = rows[:]   # (avg, occ, total, id, name, cost_val, stat, cat, crank)
+        self.rows_view = rows[:]
 
         self._build_ui(header_text)
         self._populate_table(self.rows_view)
@@ -187,11 +240,10 @@ class SummaryWindow:
         master = self.master
         master.title("OPTCG Decklists Summary")
 
-        # Use ttkbootstrap theme if available
         if TBOOT:
-            style = TBOOT.Style("cosmo")  # or "flatly", "darkly", etc.
+            tb.Style("cosmo")
         else:
-            style = ttk.Style(master)
+            ttk.Style(master)
 
         # Top frame: header + search
         top = ttk.Frame(master, padding=10)
@@ -212,17 +264,18 @@ class SummaryWindow:
         mid = ttk.Frame(master, padding=(10, 0, 10, 10))
         mid.pack(side="top", fill="both", expand=True)
 
-        cols = ("Avg", "Occ", "Total", "ID", "Name", "Stat")
+        cols = ("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
         self.tree.pack(side="left", fill="both", expand=True)
 
         # Zebra striping
+        style = ttk.Style()
         style.configure("Treeview", rowheight=24)
         self.tree.tag_configure("odd", background="#f7f7f7")
         self.tree.tag_configure("even", background="#ffffff")
 
         # Headings with sort commands
-        for i, col in enumerate(cols):
+        for col in cols:
             self.tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c, False))
 
         # Column widths
@@ -231,6 +284,7 @@ class SummaryWindow:
         self.tree.column("Total", width=70, anchor="e")
         self.tree.column("ID", width=100, anchor="w")
         self.tree.column("Name", width=260, anchor="w")
+        self.tree.column("Cost", width=70, anchor="e")
         self.tree.column("Stat", width=90, anchor="w")
 
         vsb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
@@ -258,22 +312,28 @@ class SummaryWindow:
 
     def _populate_table(self, rows):
         self.tree.delete(*self.tree.get_children())
-        for idx, (avg, occ, total, cid, nm, stat) in enumerate(rows):
+        for idx, (avg, occ, total, cid, nm, cval, stat, _cat, _crank) in enumerate(rows):
             tag = "odd" if idx % 2 else "even"
-            self.tree.insert("", "end", values=(f"{avg:.2f}", occ, total, cid, nm, stat), tags=(tag,))
+            cost_disp = "—" if cval is None else str(cval)
+            self.tree.insert("", "end",
+                             values=(f"{avg:.2f}", occ, total, cid, nm, cost_disp, stat),
+                             tags=(tag,))
 
     def _sort_by_column(self, col, reverse):
-        key_idx = {"Avg": 0, "Occ": 1, "Total": 2, "ID": 3, "Name": 4, "Stat": 5}[col]
+        # Map visible columns to row tuple indices
+        key_idx = {"Avg": 0, "Occ": 1, "Total": 2, "ID": 3, "Name": 4, "Cost": 5, "Stat": 6}[col]
 
         def key_func(row):
             val = row[key_idx]
-            if key_idx in (0, 1, 2):  # numeric
-                return row[key_idx]
+            # numeric columns: Avg, Occ, Total, Cost (index 0,1,2,5)
+            if key_idx in (0, 1, 2, 5):
+                # handle None cost
+                return (-1 if val is None else val)
             return str(val).lower()
 
         self.rows_view.sort(key=key_func, reverse=reverse)
         self._populate_table(self.rows_view)
-        # toggle next
+        # toggle for next click
         self.tree.heading(col, command=lambda c=col: self._sort_by_column(c, not reverse))
 
     def _on_search(self, event=None):
@@ -282,7 +342,7 @@ class SummaryWindow:
             self.rows_view = self.rows_all[:]
         else:
             def keep(r):
-                # r = (avg, occ, total, id, name, stat)
+                # r = (avg, occ, total, id, name, cost_val, stat, cat, crank)
                 return q in str(r[3]).lower() or q in str(r[4]).lower()
             self.rows_view = [r for r in self.rows_all if keep(r)]
         self._populate_table(self.rows_view)
@@ -323,20 +383,21 @@ class SummaryWindow:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Avg", "Occ", "Total", "ID", "Name", "Stat"])
+            w.writerow(["Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"])
             for r in self.rows_view:
-                avg, occ, total, cid, nm, stat = r
-                w.writerow([f"{avg:.2f}", occ, total, cid, nm, stat])
+                avg, occ, total, cid, nm, cval, stat, _cat, _crank = r
+                w.writerow([f"{avg:.2f}", occ, total, cid, nm, "" if cval is None else cval, stat])
         messagebox.showinfo("Export CSV", f"Saved to:\n{path}")
 
     def _export_txt(self):
         path = self._ask_save_path(".txt", [("Text files", "*.txt"), ("All files", "*.*")])
         if not path:
             return
-        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:<8}"
-        lines = [fmt.format("Avg", "Occ", "Total", "ID", "Name", "Stat"), "-" * 80]
-        for avg, occ, total, cid, nm, stat in self.rows_view:
-            lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], stat))
+        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
+        lines = [fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"), "-" * 90]
+        for avg, occ, total, cid, nm, cval, stat, _cat, _crank in self.rows_view:
+            cost_disp = "" if cval is None else str(cval)
+            lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
         Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
         messagebox.showinfo("Export TXT", f"Saved to:\n{path}")
 
@@ -372,11 +433,12 @@ def main():
 
     # Console snapshot (useful for logs)
     print(header_text)
-    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:<8}"
-    print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Stat"))
-    print("-" * 80)
-    for avg, occ, total, cid, nm, stat in rows:
-        print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], stat))
+    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
+    print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"))
+    print("-" * 90)
+    for avg, occ, total, cid, nm, cval, stat, _cat, _crank in rows:
+        cost_disp = "" if cval is None else str(cval)
+        print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
 
     # Launch GUI if Tkinter is available
     if TK_AVAILABLE:
