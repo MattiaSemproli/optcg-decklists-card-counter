@@ -18,3 +18,12 @@
 - Enhanced table: sortable columns, search, copy/export to CSV/TXT, zebra striping.
 - Improved error handling (invalid inputs highlighted instead of breaking).
 - Modularized codebase in preparation for package release.
+
+### V3.1.0
+- Added automatic tiling for summary windows:
+  - 1 summary → 80% × 80% centered.
+  - 2 summaries → 40% width × 80% height, side by side.
+  - 3 summaries → 30% width × 80% height, in one row.
+  - 4 summaries → 40% width × 40% height, 2×2 grid.
+  - >4 summaries → compact grid layout (max 3 columns).
+- Improved GUI flow stability (no more crash when closing Input window).
