@@ -1,3 +1,8 @@
+# op_tcg_lists_average_counter.py
+# NOTE: code and comments in ENGLISH (per your rule).
+# GUI-first flow: input window -> summary table window.
+# CLI fallback remains if Tkinter isn't available.
+
 import csv
 from collections import defaultdict, Counter
 from datetime import datetime
@@ -44,15 +49,15 @@ def print_error(msg: str) -> None:
     print(f"{COLOR_RED}{msg}{COLOR_RESET}")
 
 def get_category(info: dict) -> str:
-    """Return normalized category string ('character', 'event', 'stage', ...)"""
+    """Return normalized category string ('character', 'event', 'stage', 'leader', ...)."""
     if not info:
         return ""
     return (info.get('Category') or '').strip().lower()
 
 def category_rank(cat: str) -> int:
     """
-    Return rank for default grouping order:
-    Character (0) < Event (1) < Stage (2) < others (3).
+    Default grouping order:
+      Character (0) < Event (1) < Stage (2) < others (3).
     """
     c = (cat or "").lower()
     if c == "character":
@@ -66,8 +71,8 @@ def category_rank(cat: str) -> int:
 def format_card_stats(card_info: dict) -> str:
     """
     Compact stat string for the table:
-    - Events: [Event]
-    - Otherwise prefer Power; then Generic cost; else '—'
+      - Events: [Event]
+      - Otherwise prefer Power; then Generic cost; else '—'
     """
     if not card_info:
         return "—"
@@ -123,7 +128,7 @@ def get_colors(card_info: dict):
 def card_name(info: dict, fallback_id: str) -> str:
     """
     Always return something for the display name:
-    try 'Name' -> 'Card Name' -> fallback to card ID.
+      try 'Name' -> 'Card Name' -> fallback to card ID.
     """
     if not info:
         return fallback_id
@@ -134,7 +139,7 @@ def parse_deckgen_url(url: str):
     """
     Parse a onepiecetopdecks deckgen URL and return a list of (card_id, count).
     Uses the 'dg' query param which encodes like: 1nOP03-040a4nOP03-044...
-    Return [] if invalid.
+    Return [] if invalid or no 'dg'.
     """
     try:
         qs = parse_qs(urlparse(url).query)
@@ -174,7 +179,7 @@ def summarize_decks(decks):
     """
     Aggregate stats across decks.
     Returns:
-      rows: list of tuples (avg, occ, total, id, name, cost_val, stat, cat_str, cat_rank)
+      rows: list of tuples (avg, occ, total, id, name, cost_val, stat, cat, crank)
       header_text: str
       leader_name_val: str|None
       colors: list[str]
@@ -215,7 +220,7 @@ def summarize_decks(decks):
         avg_all = total / num_decks
         rows.append((avg_all, occ, total, cid, nm, cval, stat, cat, crank))
 
-    # default order: by category group, then by avg desc, then occ desc, then ID
+    # Default order: by category group, then by avg desc, then occ desc, then ID
     rows.sort(key=lambda r: (r[8], -r[0], -r[1], r[3]))
 
     header = f"Decks analyzed: {num_decks}"
@@ -226,7 +231,7 @@ def summarize_decks(decks):
 
     return rows, header, leader_name_val, colors
 
-# --------------------------- GUI window ---------------------------
+# --------------------------- GUI: summary window ---------------------------
 class SummaryWindow:
     def __init__(self, master, rows, header_text):
         self.master = master
@@ -241,7 +246,7 @@ class SummaryWindow:
         master.title("OPTCG Decklists Summary")
 
         if TBOOT:
-            tb.Style("cosmo")
+            TBOOT.Style("cosmo")
         else:
             ttk.Style(master)
 
@@ -327,8 +332,7 @@ class SummaryWindow:
             val = row[key_idx]
             # numeric columns: Avg, Occ, Total, Cost (index 0,1,2,5)
             if key_idx in (0, 1, 2, 5):
-                # handle None cost
-                return (-1 if val is None else val)
+                return -1 if val is None else val
             return str(val).lower()
 
         self.rows_view.sort(key=key_func, reverse=reverse)
@@ -401,8 +405,205 @@ class SummaryWindow:
         Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
         messagebox.showinfo("Export TXT", f"Saved to:\n{path}")
 
+# --------------------------- GUI: input window ---------------------------
+class InputWindow:
+    """
+    First-step GUI: paste deckgen links (one per line), live-validate,
+    and proceed to the summary table when at least one valid list exists.
+    """
+    def __init__(self, master, on_submit):
+        # on_submit: callable(list[str]) -> None
+        self.master = master
+        self.on_submit = on_submit
+        self.valid_links = []
+        self.invalid_links = []
+
+        self._build_ui()
+
+    def _build_ui(self):
+        self.master.title("OPTCG Decklists - Input")
+
+        container = ttk.Frame(self.master, padding=10)
+        container.pack(fill="both", expand=True)
+
+        header = ttk.Label(container, text="Paste deckgen links (one per line)", font=("Segoe UI", 11, "bold"))
+        header.pack(anchor="w", pady=(0, 6))
+
+        # Buttons row
+        btn_row = ttk.Frame(container)
+        btn_row.pack(fill="x", pady=(0, 6))
+        ttk.Button(btn_row, text="Paste from clipboard", command=self._paste_clipboard).pack(side="left")
+        ttk.Button(btn_row, text="Load .txt…", command=self._load_txt).pack(side="left", padx=6)
+        ttk.Button(btn_row, text="Clear", command=self._clear).pack(side="left")
+
+        # Text area
+        self.text = tk.Text(container, height=12, wrap="none", font=("Consolas", 10))
+        self.text.pack(fill="both", expand=True)
+        self.text.bind("<KeyRelease>", self._on_text_change)
+        self.text.bind("<Control-Return>", self._on_ctrl_enter)
+
+        # Status + Next
+        bottom = ttk.Frame(container)
+        bottom.pack(fill="x", pady=(6, 0))
+
+        self.status_var = tk.StringVar(value="Valid: 0 · Invalid: 0")
+        ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
+
+        self.next_btn = ttk.Button(bottom, text="Next →", command=self._submit, state="disabled")
+        self.next_btn.pack(side="right")
+
+        # Initial validation
+        self._validate()
+
+    def _paste_clipboard(self):
+        try:
+            clip = self.master.clipboard_get() or ""
+        except Exception:
+            clip = ""
+        if not clip:
+            return
+        lines = clip.strip().splitlines()
+        self._insert_lines(lines)
+
+    def _load_txt(self):
+        path = filedialog.askopenfilename(
+            title="Open links list",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+        except Exception:
+            messagebox.showerror("Open error", "Failed to read the file.")
+            return
+        lines = content.splitlines()
+        self._insert_lines(lines)
+
+    def _clear(self):
+        self.text.delete("1.0", "end")
+        self._validate()
+
+    def _insert_lines(self, lines):
+        # Deduplicate while keeping order
+        seen = set()
+        deduped = []
+        for ln in lines:
+            ln = ln.strip()
+            if ln and ln not in seen:
+                seen.add(ln)
+                deduped.append(ln)
+        if deduped:
+            current = self.text.get("1.0", "end-1c")
+            if current:
+                self.text.insert("end", "\n" + "\n".join(deduped))
+            else:
+                self.text.insert("1.0", "\n".join(deduped))
+        self._validate()
+
+    def _on_text_change(self, event=None):
+        self._validate()
+
+    def _on_ctrl_enter(self, event=None):
+        self._submit()
+        return "break"
+
+    def _validate(self):
+        content = self.text.get("1.0", "end-1c")
+        lines_all = content.splitlines()
+
+        # Build lists based on stripped non-empty lines
+        self.valid_links = []
+        self.invalid_links = []
+
+        for ln in lines_all:
+            s = ln.strip()
+            if not s:
+                continue
+            pairs = parse_deckgen_url(s)
+            if pairs:
+                self.valid_links.append(s)
+            else:
+                self.invalid_links.append(s)
+
+        # Update status
+        self.status_var.set(f"Valid: {len(self.valid_links)} · Invalid: {len(self.invalid_links)}")
+
+        # Highlight invalid lines in the text widget
+        self._highlight_invalid(lines_all)
+
+        # Enable Next only if we have at least one valid link
+        self.next_btn.configure(state=("normal" if self.valid_links else "disabled"))
+
+    def _highlight_invalid(self, lines_all):
+        self.text.tag_remove("invalid", "1.0", "end")
+        try:
+            self.text.tag_configure("invalid", background="#ffe6e6")  # light red
+        except Exception:
+            pass
+        # Compare stripped content against invalid set
+        invalid_set = set(self.invalid_links)
+        for i, raw in enumerate(lines_all):
+            s = raw.strip()
+            if s and s in invalid_set:
+                line_start = f"{i+1}.0"
+                line_end = f"{i+1}.end"
+                self.text.tag_add("invalid", line_start, line_end)
+
+    def _submit(self):
+        if not self.valid_links:
+            messagebox.showwarning("No lists", "Please add at least one valid deckgen link.")
+            return
+        self.on_submit(self.valid_links)
+
+# --------------------------- flow helpers ---------------------------
+def _launch_summary_window(valid_links):
+    decks = decks_from_urls(valid_links)
+    rows, header_text, leader, colors = summarize_decks(decks)
+
+    # Console snapshot (optional)
+    print(header_text)
+    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
+    print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"))
+    print("-" * 90)
+    for avg, occ, total, cid, nm, cval, stat, _cat, _crank in rows:
+        cost_disp = "" if cval is None else str(cval)
+        print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
+
+    # Open summary table UI
+    if TK_AVAILABLE:
+        if TBOOT:
+            app = TBOOT.Window(themename="cosmo")
+            SummaryWindow(app, rows, header_text)
+            app.mainloop()
+        else:
+            root = tk.Tk()
+            SummaryWindow(root, rows, header_text)
+            root.mainloop()
+    else:
+        print_error("Tkinter is not available in this environment. GUI not shown.")
+
 # --------------------------- main ---------------------------
 def main():
+    # If Tkinter is available, prefer GUI-first flow.
+    if TK_AVAILABLE:
+        # Choose themed window if ttkbootstrap is available
+        if TBOOT:
+            app = TBOOT.Window(themename="cosmo")
+        else:
+            app = tk.Tk()
+
+        def _on_submit(valid_links):
+            # Close input window and move to summary
+            # Create a NEW window for the summary to preserve theme/window state
+            app.destroy()
+            _launch_summary_window(valid_links)
+
+        InputWindow(app, on_submit=_on_submit)
+        app.mainloop()
+        return
+
+    # Fallback: CLI input
     print("Paste one deckgen link per line.")
     print("Press ENTER on an empty line to finish.\n")
 
@@ -428,30 +629,7 @@ def main():
         print_error("No valid deckgen links provided. Exiting.")
         return
 
-    decks = decks_from_urls(urls)
-    rows, header_text, leader, colors = summarize_decks(decks)
-
-    # Console snapshot (useful for logs)
-    print(header_text)
-    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
-    print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"))
-    print("-" * 90)
-    for avg, occ, total, cid, nm, cval, stat, _cat, _crank in rows:
-        cost_disp = "" if cval is None else str(cval)
-        print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
-
-    # Launch GUI if Tkinter is available
-    if TK_AVAILABLE:
-        if TBOOT:
-            app = TBOOT.Window(themename="cosmo")
-            SummaryWindow(app, rows, header_text)
-            app.mainloop()
-        else:
-            root = tk.Tk()
-            SummaryWindow(root, rows, header_text)
-            root.mainloop()
-    else:
-        print_error("Tkinter is not available in this environment. GUI not shown.")
+    _launch_summary_window(urls)
 
 if __name__ == "__main__":
     main()
