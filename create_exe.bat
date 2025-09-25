@@ -1,0 +1,1 @@
+pyinstaller --noconfirm --clean --onefile --windowed --name "OPTCG Deck Analyzer" --icon assets/icon.ico --collect-data ttkbootstrap --add-data "opc_sets;opc_sets" launcher.py
