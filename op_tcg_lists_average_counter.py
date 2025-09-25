@@ -1,10 +1,41 @@
 import re
 from collections import defaultdict
-from opcardlist import get_card
+from opc_sets import get_card
 import tkinter as tk
 from datetime import datetime
 import numpy as np
 from collections import Counter
+
+# --- helpers (safe formatting) ---
+def format_card_stats(card_info: dict) -> str:
+    """
+    Build a compact stat string for a card.
+    - For Events, show [Event]
+    - For others, prefer Power; if missing, show Generic cost; otherwise '—'
+    """
+    category = (card_info.get('Category') or '').strip()
+    if category.lower() == 'event':
+        return "[Event]"
+    power = card_info.get('Power')
+    if power is not None and str(power).strip():
+        return f"P{power}"
+    cost = card_info.get('Cost')
+    if isinstance(cost, dict) and cost.get('Generic') is not None:
+        return f"C{cost.get('Generic')}"
+    return "—"
+
+def is_leader(card_info: dict) -> bool:
+    """Return True if the card is a Leader."""
+    return (card_info.get('Category') or '').strip().lower() == 'leader'
+
+def get_colors(card_info: dict):
+    """Normalize Color field to a list of strings."""
+    colors = card_info.get('Color')
+    if isinstance(colors, list):
+        return [str(c) for c in colors]
+    if isinstance(colors, str) and colors.strip():
+        return [colors.strip()]
+    return []
 
 # display_output:
 # it takes output text, leader name and colors as input
@@ -68,6 +99,7 @@ def parse_input(input_text):
     for lst in lists:
         cards = re.findall(r'(\d+)x(OP\d{2}-\d{3})', lst)
         cards.extend(patt for patt in re.findall(r'(\d+)x(P-\d{3})', lst))
+        cards.extend(patt for patt in re.findall(r'(\d+)x(PRB\d{2}-\d{3})', lst))
         cards.extend(patt for patt in re.findall(r'(\d+)x(ST\d{2}-\d{3})', lst))
         cards.extend(patt for patt in re.findall(r'(\d+)x(EB\d{2}-\d{3})', lst))
         card_lists.append({card: int(count) for count, card in cards})
@@ -128,27 +160,30 @@ def main():
 
     output_text = ""
     leader = ""
-    colors = ""
+    colors = []
     for card, (counts, (played, avg)) in averages.items():
         counts_str = ', '.join(f"{count}x" for count in counts)
         card_info = get_card(card)
-        c_name = card_info['Card Name']
-        c_cost = f"C{card_info["Cost"]["Generic"]}"
-        c_power = f"P{card_info["Power"]}"
-        c_category = card_info["Category"]
+        if not card_info:
+            # Unknown card fallback
+            c_name = "UNKNOWN"
+            c_category = ""
+            stat = "—"
+        else:
+            c_name = card_info.get('Card Name', 'UNKNOWN')
+            c_category = card_info.get('Category', '')
+            stat = format_card_stats(card_info)
 
-        c_info = f"{c_name}, {c_cost}, {c_power if c_category != "Event" else c_category}"
+        c_info = f"{c_name}, {stat}"
 
         played_list = f"played in {played}/{len(counts)} lists"
         occurrences = f"1x {avg[1]}/{played}, 2x {avg[2]}/{played}, 3x {avg[3]}/{played}, 4x {avg[4]}/{played}"
-
-        # print(f"{card} ({c_name}, {c_cost}, {c_power}) : counts = [{counts_str}], average = {avg:.2f} in {len(counts)} lists")
         if (c_category != "Leader"):
             output_text += f"{card} ({c_info}) : counts = [{counts_str}], {played_list} ({occurrences})\n"
 
-        if (c_category == "Leader"):
+        if (is_leader(card_info or {})):
             leader = c_name
-            colors = card_info["Color"]
+            colors = get_colors(card_info or {})
 
     display_output(output_text, leader, colors)
 
