@@ -20,6 +20,13 @@ It computes average usage of each card across multiple decklists and displays re
   - Copy selection to clipboard, export to CSV/TXT.
 - **CLI fallback**:
   - If Tkinter is not available, you can still paste deckgen links in the terminal.
+- **Automatic tiling**:
+  - Arranges summary windows depending on how many decks are analyzed.
+    - 1 summary → 80% × 80% centered.
+    - 2 summaries → 40% width × 80% height, side by side.
+    - 3 summaries → 30% width × 80% height, in one row.
+    - 4 summaries → 40% width × 40% height, 2×2 grid.
+    - >4 summaries → compact grid layout (max 3 columns).
 
 ---
 
