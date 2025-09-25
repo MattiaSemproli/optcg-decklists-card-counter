@@ -1,20 +1,29 @@
 import re
-from collections import defaultdict
-from opc_sets import get_card
+from collections import defaultdict, Counter
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 import numpy as np
-from collections import Counter
+from urllib.parse import urlparse, parse_qs
 
-# --- helpers (safe formatting) ---
+# --- your local cards DB accessor ---
+try:
+    from opc_sets import get_card
+except Exception:  # fallback for testing without the package
+    def get_card(code: str):
+        return None
+
+# --------------------------- helpers ---------------------------
 def format_card_stats(card_info: dict) -> str:
     """
     Build a compact stat string for a card.
     - For Events, show [Event]
     - For others, prefer Power; if missing, show Generic cost; otherwise '—'
     """
-    category = (card_info.get('Category') or '').strip()
-    if category.lower() == 'event':
+    if not card_info:
+        return "—"
+    category = (card_info.get('Category') or '').strip().lower()
+    if category == 'event':
         return "[Event]"
     power = card_info.get('Power')
     if power is not None and str(power).strip():
@@ -25,183 +34,183 @@ def format_card_stats(card_info: dict) -> str:
     return "—"
 
 def is_leader(card_info: dict) -> bool:
-    """Return True if the card is a Leader."""
-    return (card_info.get('Category') or '').strip().lower() == 'leader'
+    return bool(card_info) and (card_info.get('Category') or '').strip().lower() == 'leader'
 
 def get_colors(card_info: dict):
-    """Normalize Color field to a list of strings."""
-    colors = card_info.get('Color')
+    colors = (card_info or {}).get('Color')
     if isinstance(colors, list):
         return [str(c) for c in colors]
     if isinstance(colors, str) and colors.strip():
         return [colors.strip()]
     return []
 
-# display_output:
-# it takes output text, leader name and colors as input
-def display_output(output_text, leader, colors):
+def parse_deckgen_url(url: str):
+    """
+    Parse a onepiecetopdecks deckgen URL and return list of (card_id, count).
+    The 'dg' query param encodes like: 1nOP03-040a4nOP03-044...
+    """
+    try:
+        qs = parse_qs(urlparse(url).query)
+        dg = qs.get("dg", [""])[0]
+        if not dg:
+            return []
+        parts = dg.split("a")
+        out = []
+        for part in parts:
+            if not part:
+                continue
+            # forms like '1nOP03-040' or '10nOP12-123'
+            if "n" not in part:
+                continue
+            cnt_str, code = part.split("n", 1)
+            if not cnt_str.isdigit():
+                continue
+            out.append((code.strip(), int(cnt_str)))
+        return out
+    except Exception:
+        return []
+
+def decks_from_urls(urls):
+    """Return list of deck dicts: [{card_id: count, ...}, ...]"""
+    decks = []
+    for u in urls:
+        pairs = parse_deckgen_url(u)
+        if not pairs:
+            continue
+        deck = defaultdict(int)
+        for cid, n in pairs:
+            deck[cid] += n
+        decks.append(dict(deck))
+    return decks
+
+def summarize_decks(decks):
+    """
+    Aggregate stats across decks.
+    Returns: (output_text, leader_name, colors)
+    """
+    if not decks:
+        return "Nessuna lista valida trovata.", None, []
+
+    num_decks = len(decks)
+    total_counts = Counter()
+    occurrence = Counter()  # in how many decks the card appears
+    for d in decks:
+        total_counts.update(d)
+        for cid in d:
+            occurrence[cid] += 1
+
+    # Try to infer leader (first leader found in first deck that has one)
+    leader_name = None
+    colors = []
+    for d in decks:
+        for cid, n in d.items():
+            info = get_card(cid) or {}
+            if is_leader(info):
+                leader_name = info.get("Name") or cid
+                colors = get_colors(info)
+                break
+        if leader_name:
+            break
+
+    # Prepare rows: avg across ALL decks (missing = 0)
+    rows = []
+    for cid in total_counts:
+        info = get_card(cid) or {}
+        name = info.get("Name") or ""
+        stat = format_card_stats(info)
+        total = total_counts[cid]
+        occ = occurrence[cid]
+        avg_all = total / num_decks
+        rows.append((avg_all, occ, total, cid, name, stat))
+
+    # sort by avg desc, then occurrence desc, then card id
+    rows.sort(key=lambda x: (-x[0], -x[1], x[3]))
+
+    # build table
+    header = f"Lists analyzed: {num_decks}"
+    if colors:
+        header += f" | Colors: {' / '.join(colors[:2])}"
+    if leader_name:
+        header += f" | Leader: {leader_name}"
+    header += "\n"
+
+    col_names = ["Avg", "Occ", "Total", "ID", "Name", "Stat"]
+    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:<8}"
+
+    lines = [header, fmt.format(*col_names), "-" * 80]
+    for avg, occ, total, cid, name, stat in rows:
+        lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, name[:32], stat))
+
+    return "\n".join(lines), leader_name, colors
+
+def display_output(output_text: str, leader: str | None, colors: list[str]):
     root = tk.Tk()
-    if len(colors) == 1:
-        root.title(f"Decklist Information: {colors[0]} {leader}")
-    else:
-        root.title(f"Decklist Information: {colors[0]} & {colors[1]} {leader}")
+    title_bits = ["Decklists Summary"]
+    if colors:
+        title_bits.append(" / ".join(colors[:2]))
+    if leader:
+        title_bits.append(leader)
+    root.title(" : ".join(title_bits))
 
-    # Insert a blank line at the start for padding
-    output_text = "\n" + output_text
+    output_text = "\n" + (output_text or "(nessun dato)")
 
-    # Set default font
-    default_font = ("Consolas", 10)
+    text = tk.Text(root, wrap="none", font=("Consolas", 10), bg="white")
+    text.insert("1.0", output_text)
+    text.configure(state="disabled")
 
-    # Create a Label widget for non-selectable text
-    label = tk.Label(
-        root,
-        text=output_text,
-        font=default_font,
-        bg="white",
-        justify="center",
-        anchor="center"
-    )
-    label.pack(fill=tk.BOTH, expand=True)
+    xscroll = tk.Scrollbar(root, orient="horizontal", command=text.xview)
+    yscroll = tk.Scrollbar(root, orient="vertical", command=text.yview)
+    text.configure(xscrollcommand=xscroll.set, yscrollcommand=yscroll.set)
 
-    # Calculate dimensions based on content
-    lines = output_text.split('\n')
-    max_line_length = max(len(line) for line in lines)
-    num_lines = len(lines)
-    char_width = 8  # Approximate width of a character in pixels
-    char_height = 18  # Approximate height of a line in pixels
-    window_width = char_width * max_line_length
-    window_height = char_height * num_lines
+    text.grid(row=0, column=0, sticky="nsew")
+    yscroll.grid(row=0, column=1, sticky="ns")
+    xscroll.grid(row=1, column=0, sticky="ew")
 
-    # Center the window on the screen
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    position_top = int(screen_height / 2 - window_height / 2)
-    position_right = int(screen_width / 2 - window_width / 2)
-    root.geometry(f'{window_width}x{window_height}+{position_right}+{position_top}')
-
-    # Make the window non-resizable
-    root.resizable(False, False)
-
-    # Bring the window to the front and activate it
-    root.attributes("-topmost", True)
-    root.update()
-    root.focus_force()
-    root.attributes("-topmost", False)
+    root.grid_rowconfigure(0, weight=1)
+    root.grid_columnconfigure(0, weight=1)
 
     root.mainloop()
 
-# parse_input: 
-# it takes a string as input
-# returns a list of dictionaries, where each dictionary represents a card list.
-def parse_input(input_text):
-    lists = input_text.strip().split('\n\n')
-    card_lists = []
-    for lst in lists:
-        cards = re.findall(r'(\d+)x(OP\d{2}-\d{3})', lst)
-        cards.extend(patt for patt in re.findall(r'(\d+)x(P-\d{3})', lst))
-        cards.extend(patt for patt in re.findall(r'(\d+)x(PRB\d{2}-\d{3})', lst))
-        cards.extend(patt for patt in re.findall(r'(\d+)x(ST\d{2}-\d{3})', lst))
-        cards.extend(patt for patt in re.findall(r'(\d+)x(EB\d{2}-\d{3})', lst))
-        card_lists.append({card: int(count) for count, card in cards})
-
-    card_lists = normalize_card_lists(card_lists)
-
-    return card_lists
-
-# normalize_card_lists: 
-# it takes a list of dictionaries as input
-# returns a list of dictionaries, where each dictionary represents a card list with the same keys.
-def normalize_card_lists(card_lists):
-    all_cards = set()
-    for card_list in card_lists:
-        all_cards.update(card_list.keys())
-    
-    normalized_lists = []
-    for card_list in card_lists:
-        normalized_list = {card: card_list.get(card, 0) for card in all_cards}
-        normalized_lists.append(normalized_list)
-    
-    return normalized_lists
-
-# calculate_averages: 
-# it takes a list of dictionaries as input
-# returns a dictionary where each key is a card and each value is a tuple containing a list of counts and the average count.
-def calculate_averages(card_lists):
-    card_counts = defaultdict(list)
-    for card_list in card_lists:
-        for card, count in card_list.items():
-            card_counts[card].append(count)
-    
-    averages = {}
-    for card, counts in card_counts.items():
-        averages[card] = (counts, (np.count_nonzero(counts), Counter(counts)))
-    return averages
-
-# main:
 def main():
-    print("Enter the card lists (separate lists with a blank line, end input with two blank lines):")
-    input_text = ""
-    blank_line_count = 0
+    print("Incolla un link deckgen per riga.")
+    print("Premi INVIO su una riga vuota per terminare.\n")
+
+    urls = []
     while True:
         try:
-            line = input()
-            if line.strip() == "":
-                blank_line_count += 1
-                if blank_line_count == 2:
-                    break
-            else:
-                blank_line_count = 0
-            input_text += line + "\n"
+            line = input("> ").strip()
         except EOFError:
             break
+        if not line:
+            break
+        urls.append(line)
 
-    card_lists = parse_input(input_text)
-    averages = calculate_averages(card_lists)
+    decks = decks_from_urls(urls)
+    output_text, leader, colors = summarize_decks(decks)
 
-    output_text = ""
-    leader = ""
-    colors = []
-    for card, (counts, (played, avg)) in averages.items():
-        counts_str = ', '.join(f"{count}x" for count in counts)
-        card_info = get_card(card)
-        if not card_info:
-            # Unknown card fallback
-            c_name = "UNKNOWN"
-            c_category = ""
-            stat = "—"
-        else:
-            c_name = card_info.get('Card Name', 'UNKNOWN')
-            c_category = card_info.get('Category', '')
-            stat = format_card_stats(card_info)
+    print("\n" + output_text + "\n")
+    try:
+        display_output(output_text, leader, colors)
+    except Exception:
+        # in ambienti headless, ignora la UI
+        pass
 
-        c_info = f"{c_name}, {stat}"
-
-        played_list = f"played in {played}/{len(counts)} lists"
-        occurrences = f"1x {avg[1]}/{played}, 2x {avg[2]}/{played}, 3x {avg[3]}/{played}, 4x {avg[4]}/{played}"
-        if (c_category != "Leader"):
-            output_text += f"{card} ({c_info}) : counts = [{counts_str}], {played_list} ({occurrences})\n"
-
-        if (is_leader(card_info or {})):
-            leader = c_name
-            colors = get_colors(card_info or {})
-
-    display_output(output_text, leader, colors)
-
-    # dd/mm/YY H:M:S
+    # build filename
     dt_string = datetime.now().strftime("%d%m%Y_%H%M%S")
-    filename = ""
-    if len(colors) == 1:
-        filename = f"{colors[0]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
-    else:
-        filename = f"{colors[0]}_{colors[1]}_{'_'.join(leader.split(' '))}_{dt_string}.txt"
+    leader_sanitized = (leader or "Leader").replace(" ", "_")
+    color_tag = "_".join(colors[:2]) if colors else "Colors"
+    filename = f"{color_tag}_{leader_sanitized}_{dt_string}.txt"
 
-    if (input("Do you want to save the output to a file? (y/n): ").lower() == "y"):
-        print(f"Saving output to {filename}")
-        with open(f"output\\{filename}", "x") as file:
-            file.write(output_text)
+    save = input("Vuoi salvare l'output su file? (y/n): ").strip().lower()
+    if save == "y":
+        outdir = Path("output")
+        outdir.mkdir(parents=True, exist_ok=True)
+        outfile = outdir / filename
+        with open(outfile, "w", encoding="utf-8") as f:
+            f.write(output_text)
+        print(f"Salvato: {outfile.resolve()}")
     else:
-        print("Output not saved.")
+        print("Output non salvato.")
 
-# Entry point of the script
 if __name__ == "__main__":
     main()
