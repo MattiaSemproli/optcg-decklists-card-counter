@@ -1,34 +1,24 @@
 # core.py
-# Helpers: parsing, local DB access, aggregation, grouping. Code/comments in English.
+# Code and comments in ENGLISH, as requested.
 
-import csv
 from collections import defaultdict, Counter
 from urllib.parse import urlparse, parse_qs
+from typing import Dict, List, Tuple, Optional
 
-# Optional cards DB accessor
+# -------------- optional cards DB accessor --------------
 try:
     from opc_sets import get_card
 except Exception:
     def get_card(code: str):
         return None
 
-# ---------- terminal pretties (only for CLI fallback) ----------
-try:
-    from colorama import init as colorama_init, Fore, Style
-    colorama_init()
-    COLOR_RED = Fore.RED
-    COLOR_RESET = Style.RESET_ALL
-except Exception:
-    COLOR_RED = "\033[31m"
-    COLOR_RESET = "\033[0m"
-
+# -------------- console helper --------------
 def print_error(msg: str) -> None:
-    """Print a red error line without stopping the program."""
-    print(f"{COLOR_RED}{msg}{COLOR_RESET}")
+    print(f"\033[31m{msg}\033[0m")
 
-# ---------- card helpers ----------
+# -------------- card helpers --------------
 def get_category(info: dict) -> str:
-    """Return normalized category string ('character', 'event', 'stage', 'leader', ...)."""
+    """Return normalized category string ('character','event','stage','leader',...)."""
     if not info:
         return ""
     return (info.get('Category') or '').strip().lower()
@@ -47,7 +37,33 @@ def category_rank(cat: str) -> int:
         return 2
     return 3
 
-def card_cost(info: dict):
+def format_card_stats(card_info: dict) -> str:
+    """
+    Display rule for the 'Stat' column:
+      - Events -> "[Event]"
+      - All others -> show Counter as CXXXX (e.g., C2000, C1000, C0 if no counter)
+    """
+    if not card_info:
+        return "—"
+    if get_category(card_info) == "event":
+        return "[Event]"
+    if get_category(card_info) == "stage":
+        return "[Stage]"
+
+    # Parse Counter -> int; if missing/non-numeric, treat as 0
+    ctr = card_info.get("Counter", 0)
+    val = 0
+    if ctr is not None and str(ctr).strip() != "":
+        try:
+            val = int(ctr)
+        except Exception:
+            try:
+                val = int(float(ctr))
+            except Exception:
+                val = 0
+    return f"C{val}"
+
+def card_cost(info: dict) -> Optional[int]:
     """Extract numeric Generic cost if available; otherwise return None."""
     if not info:
         return None
@@ -72,46 +88,25 @@ def card_cost(info: dict):
                 return None
     return None
 
-def card_power(info: dict):
-    """Return numeric Power if present, else None."""
-    if not info:
-        return None
-    p = info.get('Power')
-    if p is None or str(p).strip() == "":
-        return None
-    try:
-        return int(p)
-    except Exception:
-        try:
-            return int(float(p))
-        except Exception:
-            return None
+def is_leader(card_info: dict) -> bool:
+    return get_category(card_info) == 'leader'
 
-def card_colors(info: dict):
-    """Return list of color strings."""
-    colors = (info or {}).get('Color')
+def get_colors(card_info: dict) -> List[str]:
+    colors = (card_info or {}).get('Color')
     if isinstance(colors, list):
         return [str(c) for c in colors]
     if isinstance(colors, str) and colors.strip():
         return [colors.strip()]
     return []
 
-def card_color_str(info: dict) -> str:
-    """Return display string for colors (joined with '/')."""
-    cols = card_colors(info)
-    return " / ".join(cols) if cols else ""
-
-def is_leader(info: dict) -> bool:
-    return get_category(info) == 'leader'
-
 def card_name(info: dict, fallback_id: str) -> str:
-    """Return Name -> Card Name -> card ID as fallback."""
+    """Return display name: try 'Name' -> 'Card Name' -> fallback to card ID."""
     if not info:
         return fallback_id
     return (info.get("Name") or info.get("Card Name") or fallback_id)
 
-# ---------- parsing ----------
-def parse_deckgen_url(url: str):
+# -------------- deckgen parsing --------------
+def parse_deckgen_url(url: str) -> List[Tuple[str, int]]:
     """
     Parse a onepiecetopdecks deckgen URL and return a list of (card_id, count).
     Uses the 'dg' query param which encodes like: 1nOP03-040a4nOP03-044...
@@ -137,7 +132,7 @@ def parse_deckgen_url(url: str):
     except Exception:
         return []
 
-def decks_from_urls(urls):
+def decks_from_urls(urls: List[str]) -> List[Dict[str, int]]:
     """Return a list of deck dicts: [{card_id: count, ...}, ...]."""
     decks = []
     for u in urls:
@@ -150,79 +145,85 @@ def decks_from_urls(urls):
         decks.append(dict(deck))
     return decks
 
-# ---------- leader inference & grouping ----------
-def infer_deck_leader(deck: dict):
+# -------------- grouping by leader --------------
+def group_decks_by_leader(decks: List[Dict[str, int]]):
     """
-    Given a single deck {card_id: count}, return (leader_id, leader_name, leader_colors_list) if any;
-    otherwise (None, None, []).
-    """
-    for cid in deck:
-        info = get_card(cid) or {}
-        if is_leader(info):
-            return cid, card_name(info, cid), card_colors(info)
-    return None, None, []
-
-def group_decks_by_leader(decks):
-    """
-    Partition decks by inferred leader ID.
+    Group deck dicts by detected leader ID (first Leader found in each deck).
     Returns:
-      groups: dict[leader_id_or_None] -> list[deck]
-      meta: dict[leader_id_or_None] -> {"name": str|None, "colors": list[str]}
-    Decks with no detectable leader are grouped under key None.
+      groups: dict[leader_id_or_NO_LEADER] -> list[deck dict]
+      meta: dict with optional helpful info (currently empty, kept for API compat)
     """
-    from collections import defaultdict as _df
-    groups = _df(list)
-    meta = {}
+    groups: Dict[str, List[Dict[str, int]]] = defaultdict(list)
     for d in decks:
-        lid, lname, lcols = infer_deck_leader(d)
-        groups[lid].append(d)
-        if lid not in meta:
-            meta[lid] = {"name": lname, "colors": lcols}
-    return groups, meta
+        leader_id = "NO_LEADER"
+        for cid in d.keys():
+            info = get_card(cid) or {}
+            if is_leader(info):
+                leader_id = cid
+                break
+        groups[leader_id].append(d)
+    return dict(groups), {}
 
-# ---------- aggregation ----------
-def summarize_decks(decks):
+# -------------- aggregation with per-deck breakdown --------------
+def summarize_decks_with_breakdown(decks):
     """
-    Aggregate stats across decks (leaders are EXCLUDED from the rows).
+    Aggregate stats across decks and also return per-card per-deck counts.
     Returns:
-      rows: list of tuples (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
+      rows: list of tuples (avg, occ, total, id, name, cost_val, stat, cat, crank)
       header_text: str
       leader_name_val: str|None
       colors: list[str]
+      perdeck_counts: dict[str, list[int]]   # card_id -> [counts per deck where count>0]
+      total_counts: dict[str, int]           # card_id -> total copies across group
     """
     if not decks:
-        return [], "No valid lists found.", None, []
+        return [], "No valid lists found.", None, [], {}, {}
 
     num_decks = len(decks)
     total_counts = Counter()
     occurrence = Counter()
+
+    # per-deck counts (store only positive counts)
+    perdeck_counts = defaultdict(list)
+
     for d in decks:
         total_counts.update(d)
+        for cid, c in d.items():
+            if c > 0:
+                perdeck_counts[cid].append(c)
         for cid in d:
             occurrence[cid] += 1
 
-    # detect a leader just for header (may be None)
-    lid, leader_name_val, colors = infer_deck_leader(decks[0]) if decks else (None, None, [])
+    # detect leader & colors from first deck that has a leader
+    leader_name_val = None
+    colors = []
+    for d in decks:
+        for cid in d:
+            info = get_card(cid) or {}
+            if is_leader(info):
+                leader_name_val = card_name(info, cid)
+                colors = get_colors(info)
+                break
+        if leader_name_val:
+            break
 
     rows = []
     for cid in total_counts:
         info = get_card(cid) or {}
-        cat = get_category(info)
-        if cat == "leader":
+        if is_leader(info):
             continue  # exclude leaders from rows
-
         nm = card_name(info, cid)
-        cval = card_cost(info)          # numeric or None
-        pval = card_power(info)         # numeric or None
-        colstr = card_color_str(info)   # "Red", "Blue / Green", ...
+        stat = format_card_stats(info)
+        cval = card_cost(info)
+        cat = get_category(info)
         crank = category_rank(cat)
         total = total_counts[cid]
         occ = occurrence[cid]
         avg_all = total / num_decks
-        rows.append((avg_all, occ, total, cid, nm, cval, colstr, pval, cat, crank))
+        rows.append((avg_all, occ, total, cid, nm, cval, stat, cat, crank))
 
-    # default order: by category group, then by avg desc, then occ desc, then ID
-    rows.sort(key=lambda r: (r[9], -r[0], -r[1], r[3]))
+    # order: by category group, then avg desc, then occ desc, then ID
+    rows.sort(key=lambda r: (r[8], -r[0], -r[1], r[3]))
 
     header = f"Decks analyzed: {num_decks}"
     if colors:
@@ -230,4 +231,4 @@ def summarize_decks(decks):
     if leader_name_val:
         header += f" | Leader: {leader_name_val}"
 
-    return rows, header, leader_name_val, colors
+    return rows, header, leader_name_val, colors, dict(perdeck_counts), dict(total_counts)

@@ -104,3 +104,31 @@ def tile_summary_windows(root, windows):
 
     for win, (x, y, w, h) in zip(windows, rects):
         _apply_geometry(win, x, y, w, h)
+
+# utils.py (ADD)
+
+def center_child(parent, child, rel_width=0.6, rel_height=0.6):
+    """
+    Size the child as a fraction of the parent window and center it over the parent.
+    """
+    parent.update_idletasks()
+    child.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    if pw <= 1 or ph <= 1:
+        # fallback to screen if parent not yet laid out
+        screen_w = parent.winfo_screenwidth()
+        screen_h = parent.winfo_screenheight()
+        w = int(screen_w * rel_width)
+        h = int(screen_h * rel_height)
+        x = (screen_w // 2) - (w // 2)
+        y = (screen_h // 2) - (h // 2)
+    else:
+        w = int(pw * rel_width)
+        h = int(ph * rel_height)
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        x = px + (pw // 2) - (w // 2)
+        y = py + (ph // 2) - (h // 2)
+
+    child.geometry(f"{w}x{h}+{x}+{y}")
