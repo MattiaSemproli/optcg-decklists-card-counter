@@ -1,6 +1,6 @@
 # op_tcg_lists_average_counter.py
 # NOTE: code and comments in ENGLISH (per your rule).
-# GUI-first flow: input window -> summary table window.
+# GUI-first flow: input window -> one summary window PER LEADER.
 # CLI fallback remains if Tkinter isn't available.
 
 import csv
@@ -68,25 +68,6 @@ def category_rank(cat: str) -> int:
         return 2
     return 3
 
-def format_card_stats(card_info: dict) -> str:
-    """
-    Compact stat string for the table:
-      - Events: [Event]
-      - Otherwise prefer Power; then Generic cost; else '—'
-    """
-    if not card_info:
-        return "—"
-    cat = get_category(card_info)
-    if cat == 'event':
-        return "[Event]"
-    power = card_info.get('Power')
-    if power is not None and str(power).strip():
-        return f"P{power}"
-    cost = card_info.get('Cost')
-    if isinstance(cost, dict) and cost.get('Generic') is not None:
-        return f"C{cost.get('Generic')}"
-    return "—"
-
 def card_cost(info: dict):
     """
     Extract numeric Generic cost if available; otherwise return None.
@@ -114,22 +95,40 @@ def card_cost(info: dict):
                 return None
     return None
 
-def is_leader(card_info: dict) -> bool:
-    return get_category(card_info) == 'leader'
+def card_power(info: dict):
+    """Return numeric Power if present, else None."""
+    if not info:
+        return None
+    p = info.get('Power')
+    if p is None or str(p).strip() == "":
+        return None
+    try:
+        return int(p)
+    except Exception:
+        try:
+            return int(float(p))
+        except Exception:
+            return None
 
-def get_colors(card_info: dict):
-    colors = (card_info or {}).get('Color')
+def card_colors(info: dict):
+    """Return list of color strings."""
+    colors = (info or {}).get('Color')
     if isinstance(colors, list):
         return [str(c) for c in colors]
     if isinstance(colors, str) and colors.strip():
         return [colors.strip()]
     return []
 
+def card_color_str(info: dict) -> str:
+    """Return display string for colors (joined with '/')."""
+    cols = card_colors(info)
+    return " / ".join(cols) if cols else ""
+
+def is_leader(info: dict) -> bool:
+    return get_category(info) == 'leader'
+
 def card_name(info: dict, fallback_id: str) -> str:
-    """
-    Always return something for the display name:
-      try 'Name' -> 'Card Name' -> fallback to card ID.
-    """
+    """Return Name -> Card Name -> card ID as fallback."""
     if not info:
         return fallback_id
     return (info.get("Name") or info.get("Card Name") or fallback_id)
@@ -174,12 +173,41 @@ def decks_from_urls(urls):
         decks.append(dict(deck))
     return decks
 
+# --------------------------- leader inference & grouping ---------------------------
+def infer_deck_leader(deck: dict):
+    """
+    Given a single deck {card_id: count}, return (leader_id, leader_name, leader_colors_list) if any;
+    otherwise (None, None, []).
+    """
+    for cid in deck:
+        info = get_card(cid) or {}
+        if is_leader(info):
+            return cid, card_name(info, cid), card_colors(info)
+    return None, None, []
+
+def group_decks_by_leader(decks):
+    """
+    Partition decks by inferred leader ID.
+    Returns:
+      groups: dict[leader_id_or_None] -> list[deck]
+      meta: dict[leader_id_or_None] -> {"name": str|None, "colors": list[str]}
+    Decks with no detectable leader are grouped under key None.
+    """
+    groups = defaultdict(list)
+    meta = {}
+    for d in decks:
+        lid, lname, lcols = infer_deck_leader(d)
+        groups[lid].append(d)
+        if lid not in meta:
+            meta[lid] = {"name": lname, "colors": lcols}
+    return groups, meta
+
 # --------------------------- aggregation ---------------------------
 def summarize_decks(decks):
     """
-    Aggregate stats across decks.
+    Aggregate stats across decks (leaders are EXCLUDED from the rows).
     Returns:
-      rows: list of tuples (avg, occ, total, id, name, cost_val, stat, cat, crank)
+      rows: list of tuples (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
       header_text: str
       leader_name_val: str|None
       colors: list[str]
@@ -195,33 +223,32 @@ def summarize_decks(decks):
         for cid in d:
             occurrence[cid] += 1
 
+    # detect a leader just for header (may be None)
     leader_name_val = None
     colors = []
-    for d in decks:
-        for cid in d:
-            info = get_card(cid) or {}
-            if is_leader(info):
-                leader_name_val = card_name(info, cid)
-                colors = get_colors(info)
-                break
-        if leader_name_val:
-            break
+    lid, lname, lcols = infer_deck_leader(decks[0]) if decks else (None, None, [])
+    leader_name_val = lname
+    colors = lcols
 
     rows = []
     for cid in total_counts:
         info = get_card(cid) or {}
-        nm = card_name(info, cid)
-        stat = format_card_stats(info)
-        cval = card_cost(info)  # numeric or None
         cat = get_category(info)
+        if cat == "leader":
+            continue  # EXCLUDE leaders from rows
+
+        nm = card_name(info, cid)
+        cval = card_cost(info)          # numeric or None
+        pval = card_power(info)         # numeric or None
+        colstr = card_color_str(info)   # "Red", "Blue / Green", ...
         crank = category_rank(cat)
         total = total_counts[cid]
         occ = occurrence[cid]
         avg_all = total / num_decks
-        rows.append((avg_all, occ, total, cid, nm, cval, stat, cat, crank))
+        rows.append((avg_all, occ, total, cid, nm, cval, colstr, pval, cat, crank))
 
     # Default order: by category group, then by avg desc, then occ desc, then ID
-    rows.sort(key=lambda r: (r[8], -r[0], -r[1], r[3]))
+    rows.sort(key=lambda r: (r[9], -r[0], -r[1], r[3]))
 
     header = f"Decks analyzed: {num_decks}"
     if colors:
@@ -233,17 +260,20 @@ def summarize_decks(decks):
 
 # --------------------------- GUI: summary window ---------------------------
 class SummaryWindow:
-    def __init__(self, master, rows, header_text):
+    def __init__(self, master, rows, header_text, title_suffix: str = ""):
         self.master = master
-        self.rows_all = rows[:]   # (avg, occ, total, id, name, cost_val, stat, cat, crank)
+        self.rows_all = rows[:]   # (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
         self.rows_view = rows[:]
 
-        self._build_ui(header_text)
+        self._build_ui(header_text, title_suffix)
         self._populate_table(self.rows_view)
 
-    def _build_ui(self, header_text: str):
+    def _build_ui(self, header_text: str, title_suffix: str):
         master = self.master
-        master.title("OPTCG Decklists Summary")
+        base_title = "OPTCG Decklists Summary"
+        if title_suffix:
+            base_title += f" — {title_suffix}"
+        master.title(base_title)
 
         if TBOOT:
             TBOOT.Style("cosmo")
@@ -269,7 +299,7 @@ class SummaryWindow:
         mid = ttk.Frame(master, padding=(10, 0, 10, 10))
         mid.pack(side="top", fill="both", expand=True)
 
-        cols = ("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat")
+        cols = ("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
         self.tree.pack(side="left", fill="both", expand=True)
 
@@ -288,9 +318,10 @@ class SummaryWindow:
         self.tree.column("Occ", width=60, anchor="e")
         self.tree.column("Total", width=70, anchor="e")
         self.tree.column("ID", width=100, anchor="w")
-        self.tree.column("Name", width=260, anchor="w")
-        self.tree.column("Cost", width=70, anchor="e")
-        self.tree.column("Stat", width=90, anchor="w")
+        self.tree.column("Name", width=240, anchor="w")
+        self.tree.column("Cost", width=60, anchor="e")
+        self.tree.column("Color", width=120, anchor="w")
+        self.tree.column("Power", width=70, anchor="e")
 
         vsb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=vsb.set)
@@ -317,21 +348,25 @@ class SummaryWindow:
 
     def _populate_table(self, rows):
         self.tree.delete(*self.tree.get_children())
-        for idx, (avg, occ, total, cid, nm, cval, stat, _cat, _crank) in enumerate(rows):
+        for idx, (avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank) in enumerate(rows):
             tag = "odd" if idx % 2 else "even"
-            cost_disp = "—" if cval is None else str(cval)
+            cost_disp = "" if cval is None else str(cval)
+            pow_disp = "" if pval is None else str(pval)
             self.tree.insert("", "end",
-                             values=(f"{avg:.2f}", occ, total, cid, nm, cost_disp, stat),
+                             values=(f"{avg:.2f}", occ, total, cid, nm, cost_disp, colstr, pow_disp),
                              tags=(tag,))
 
     def _sort_by_column(self, col, reverse):
         # Map visible columns to row tuple indices
-        key_idx = {"Avg": 0, "Occ": 1, "Total": 2, "ID": 3, "Name": 4, "Cost": 5, "Stat": 6}[col]
+        key_idx = {
+            "Avg": 0, "Occ": 1, "Total": 2, "ID": 3,
+            "Name": 4, "Cost": 5, "Color": 6, "Power": 7
+        }[col]
 
         def key_func(row):
             val = row[key_idx]
-            # numeric columns: Avg, Occ, Total, Cost (index 0,1,2,5)
-            if key_idx in (0, 1, 2, 5):
+            # numeric columns: Avg, Occ, Total, Cost, Power
+            if key_idx in (0, 1, 2, 5, 7):
                 return -1 if val is None else val
             return str(val).lower()
 
@@ -346,7 +381,7 @@ class SummaryWindow:
             self.rows_view = self.rows_all[:]
         else:
             def keep(r):
-                # r = (avg, occ, total, id, name, cost_val, stat, cat, crank)
+                # r = (avg, occ, total, id, name, cost_val, color_str, power_val, cat, crank)
                 return q in str(r[3]).lower() or q in str(r[4]).lower()
             self.rows_view = [r for r in self.rows_all if keep(r)]
         self._populate_table(self.rows_view)
@@ -387,21 +422,25 @@ class SummaryWindow:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"])
+            w.writerow(["Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"])
             for r in self.rows_view:
-                avg, occ, total, cid, nm, cval, stat, _cat, _crank = r
-                w.writerow([f"{avg:.2f}", occ, total, cid, nm, "" if cval is None else cval, stat])
+                avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank = r
+                w.writerow([f"{avg:.2f}", occ, total, cid, nm,
+                            "" if cval is None else cval,
+                            colstr,
+                            "" if pval is None else pval])
         messagebox.showinfo("Export CSV", f"Saved to:\n{path}")
 
     def _export_txt(self):
         path = self._ask_save_path(".txt", [("Text files", "*.txt"), ("All files", "*.*")])
         if not path:
             return
-        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
-        lines = [fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"), "-" * 90]
-        for avg, occ, total, cid, nm, cval, stat, _cat, _crank in self.rows_view:
+        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<28}  {:>4}  {:<12}  {:>5}"
+        lines = [fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"), "-" * 100]
+        for avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank in self.rows_view:
             cost_disp = "" if cval is None else str(cval)
-            lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
+            pow_disp = "" if pval is None else str(pval)
+            lines.append(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:28], cost_disp, colstr[:12], pow_disp))
         Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
         messagebox.showinfo("Export TXT", f"Saved to:\n{path}")
 
@@ -409,7 +448,7 @@ class SummaryWindow:
 class InputWindow:
     """
     First-step GUI: paste deckgen links (one per line), live-validate,
-    and proceed to the summary table when at least one valid list exists.
+    and proceed to one or more summary windows (one per leader).
     """
     def __init__(self, master, on_submit):
         # on_submit: callable(list[str]) -> None
@@ -541,7 +580,6 @@ class InputWindow:
             self.text.tag_configure("invalid", background="#ffe6e6")  # light red
         except Exception:
             pass
-        # Compare stripped content against invalid set
         invalid_set = set(self.invalid_links)
         for i, raw in enumerate(lines_all):
             s = raw.strip()
@@ -557,31 +595,91 @@ class InputWindow:
         self.on_submit(self.valid_links)
 
 # --------------------------- flow helpers ---------------------------
-def _launch_summary_window(valid_links):
+def _launch_summary_windows(valid_links):
+    """
+    Build decks, group them by leader, and open one summary window per leader group.
+    Root window stays hidden; app exits automatically when the last summary window closes.
+    """
     decks = decks_from_urls(valid_links)
-    rows, header_text, leader, colors = summarize_decks(decks)
+    if not decks:
+        print_error("No valid deck data could be parsed.")
+        return
 
-    # Console snapshot (optional)
-    print(header_text)
-    fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<32}  {:>4}  {:<8}"
-    print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Stat"))
-    print("-" * 90)
-    for avg, occ, total, cid, nm, cval, stat, _cat, _crank in rows:
-        cost_disp = "" if cval is None else str(cval)
-        print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:32], cost_disp, stat))
+    groups, meta = group_decks_by_leader(decks)
 
-    # Open summary table UI
-    if TK_AVAILABLE:
-        if TBOOT:
-            app = TBOOT.Window(themename="cosmo")
-            SummaryWindow(app, rows, header_text)
-            app.mainloop()
-        else:
-            root = tk.Tk()
-            SummaryWindow(root, rows, header_text)
-            root.mainloop()
-    else:
+    if not TK_AVAILABLE:
         print_error("Tkinter is not available in this environment. GUI not shown.")
+        return
+
+    # Create a single hidden root
+    if TBOOT:
+        root = TBOOT.Window(themename="cosmo")
+    else:
+        root = tk.Tk()
+    root.withdraw()  # keep root hidden, no "mini window"
+
+    # Track how many top-level windows are open; when the last one closes, exit the app
+    root._open_windows = 0  # type: ignore[attr-defined]
+
+    def make_on_close(win):
+        def _on_close():
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            # decrement counter and quit app if no windows remain
+            try:
+                root._open_windows -= 1  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if getattr(root, "_open_windows", 0) <= 0:
+                try:
+                    root.quit()
+                    root.destroy()
+                except Exception:
+                    pass
+        return _on_close
+
+    any_window = False
+    for lid, decks_in_group in groups.items():
+        rows, header_text, leader_name, colors = summarize_decks(decks_in_group)
+
+        # Console snapshot (optional)
+        print(header_text)
+        fmt = "{:>5}  {:>4}  {:>6}  {:<10}  {:<28}  {:>4}  {:<12}  {:>5}"
+        print(fmt.format("Avg", "Occ", "Total", "ID", "Name", "Cost", "Color", "Power"))
+        print("-" * 100)
+        for avg, occ, total, cid, nm, cval, colstr, pval, _cat, _crank in rows:
+            cost_disp = "" if cval is None else str(cval)
+            pow_disp = "" if pval is None else str(pval)
+            print(fmt.format(f"{avg:.2f}", str(occ), str(total), cid, nm[:28], cost_disp, colstr[:12], pow_disp))
+
+        if not rows:
+            continue
+
+        # Create one Toplevel per leader group
+        if TBOOT:
+            win = TBOOT.Toplevel(root)
+        else:
+            win = tk.Toplevel(root)
+
+        # Increment window counter and attach close handler
+        root._open_windows += 1  # type: ignore[attr-defined]
+        win.protocol("WM_DELETE_WINDOW", make_on_close(win))
+
+        title_suffix = leader_name or "Unknown Leader"
+        SummaryWindow(win, rows, header_text, title_suffix=title_suffix)
+        any_window = True
+
+    if any_window:
+        # No deiconify(): root stays hidden; mainloop runs until last Toplevel is closed
+        root.mainloop()
+    else:
+        print_error("No rows to display after filtering (leaders are excluded).")
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 # --------------------------- main ---------------------------
 def main():
@@ -594,16 +692,15 @@ def main():
             app = tk.Tk()
 
         def _on_submit(valid_links):
-            # Close input window and move to summary
-            # Create a NEW window for the summary to preserve theme/window state
+            # Close input window and move to multiple summary windows (one per leader)
             app.destroy()
-            _launch_summary_window(valid_links)
+            _launch_summary_windows(valid_links)
 
         InputWindow(app, on_submit=_on_submit)
         app.mainloop()
         return
 
-    # Fallback: CLI input
+    # Fallback: CLI input (single-pass, still groups by leader when rendering)
     print("Paste one deckgen link per line.")
     print("Press ENTER on an empty line to finish.\n")
 
@@ -629,7 +726,7 @@ def main():
         print_error("No valid deckgen links provided. Exiting.")
         return
 
-    _launch_summary_window(urls)
+    _launch_summary_windows(urls)
 
 if __name__ == "__main__":
     main()
